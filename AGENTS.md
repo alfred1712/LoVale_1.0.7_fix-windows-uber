@@ -23,7 +23,7 @@ Antes de modificar código:
 Después de modificar código:
 1. Ejecutar build local.
 2. Corregir todos los errores de compilación.
-3. Los warnings pueden permanecer solo si no comprometen estabilidad, compatibilidad o mantenimiento.
+3. Los warnings pueden permanecer solo si no comprometen estabilidad, compatibilidad, seguridad o mantenimiento.
 4. Resumir archivos modificados, motivo y riesgos.
 5. No hacer merge automáticamente.
 
@@ -135,7 +135,9 @@ Si se usan varios criterios de rentabilidad, la clasificación debe basarse en e
 El overlay debe ser minimalista y no cubrir gran parte de la pantalla.
 
 Debe mostrar principalmente:
-- `RENTABLE` en verde
+- tarifa por km
+- tarifa por hora
+- - `RENTABLE` en verde
 - `CASI RENTABLE` en amarillo
 - `NO RENTABLE` en rojo
 - `ZONA NO DESEADA` en rojo
@@ -144,8 +146,6 @@ Para zona no deseada, mostrar además el nombre de la zona si está disponible.
 
 No mostrar por defecto en el overlay:
 - precio
-- tarifa por km
-- tarifa por hora
 - distancia
 - duración
 - pickup completo
@@ -245,10 +245,8 @@ La versión puede considerarse candidata a merge cuando:
 1. Compila sin errores.
 2. LoVale inicia pausado.
 3. No existe botón manual de OCR.
-4. Cabify sigue detectando y evaluando ofertas.
-5. DiDi sigue detectando y evaluando ofertas.
-6. Uber genera al menos una alerta correcta en prueba real.
-7. Si Accessibility no ve la oferta de Uber, el OCR fallback se ejecuta y queda visible en logs.
-8. Overlay verde/amarillo/rojo funciona según los parámetros configurados.
-9. Zona excluida genera alerta roja específica.
-10. No hay cierres inesperados durante una sesión normal de prueba.
+4. Uber genera al menos una alerta correcta en prueba real.
+5. Si Accessibility no ve la oferta de Uber, el OCR fallback se ejecuta y queda visible en logs.
+6. Overlay verde/amarillo/rojo funciona según los parámetros configurados.
+7. Zona excluida genera alerta roja específica.
+8. No hay cierres inesperados durante una sesión normal de prueba.
