@@ -4,7 +4,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -12,11 +14,12 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
+import android.widget.ImageButton
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.lovale2.R
 
+/** Overlay compacto de LoVale 1.0.8. */
 class TripOverlayService : Service() {
 
     companion object {
@@ -27,27 +30,15 @@ class TripOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
-
     private lateinit var tvStatus: TextView
-    private lateinit var tvPrice: TextView
-    private lateinit var tvPricePerKm: TextView
-    private lateinit var tvPricePerHour: TextView
-    private lateinit var tvTripDetails: TextView
-    private lateinit var tvPickup: TextView
-    private lateinit var tvDestination: TextView
-    private lateinit var tvForbiddenZoneWarning: TextView
-    private lateinit var btnClose: Button
+    private lateinit var tvZone: TextView
+    private lateinit var btnClose: ImageButton
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-
-        // Requerido: todo servicio arrancado con startForegroundService() DEBE
-        // llamar a startForeground() en los primeros segundos, o el sistema
-        // mata el proceso con ForegroundServiceDidNotStartInTimeException.
         iniciarComoForegroundService()
-
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val layoutParamsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -57,82 +48,65 @@ class TripOverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        val width = (resources.displayMetrics.widthPixels * 0.72f).toInt()
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
+            width,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutParamsType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 100
+            y = dp(72)
         }
 
         floatingView = LayoutInflater.from(this).inflate(R.layout.layout_floating_alert, null)
-
         floatingView?.let { view ->
             tvStatus = view.findViewById(R.id.tvStatus)
-            tvPrice = view.findViewById(R.id.tvPrice)
-            tvPricePerKm = view.findViewById(R.id.tvPricePerKm)
-            tvPricePerHour = view.findViewById(R.id.tvPricePerHour)
-            tvTripDetails = view.findViewById(R.id.tvTripDetails)
-            tvPickup = view.findViewById(R.id.tvPickup)
-            tvDestination = view.findViewById(R.id.tvDestination)
-            tvForbiddenZoneWarning = view.findViewById(R.id.tvForbiddenZoneWarning)
+            tvZone = view.findViewById(R.id.tvZone)
             btnClose = view.findViewById(R.id.btnClose)
-
             btnClose.setOnClickListener { stopSelf() }
         }
 
         try {
             windowManager?.addView(floatingView, params)
         } catch (e: Exception) {
-            Log.e(TAG, "No se pudo agregar la ventana flotante (¿falta permiso 'Mostrar sobre otras apps'?)", e)
+            Log.e(TAG, "No se pudo agregar la ventana flotante", e)
             stopSelf()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.let {
-            val price = it.getDoubleExtra("EXTRA_PRICE", 0.0)
-            val rateKm = it.getDoubleExtra("EXTRA_RATE_KM", 0.0)
-            val rateHour = it.getDoubleExtra("EXTRA_RATE_HOUR", 0.0)
-            val km = it.getDoubleExtra("EXTRA_DISTANCE_KM", 0.0)
-            val minutes = it.getDoubleExtra("EXTRA_DURATION_MIN", 0.0)
-            val pickup = it.getStringExtra("EXTRA_PICKUP") ?: ""
-            val destination = it.getStringExtra("EXTRA_DESTINATION") ?: ""
-            val zoneDest = it.getStringExtra("EXTRA_ZONE_DESTINATION") ?: ""
-            val zonePickup = it.getStringExtra("EXTRA_ZONE_PICKUP") ?: ""
-            val isProfitable = it.getBooleanExtra("EXTRA_IS_PROFITABLE", false)
-            val motivo = it.getStringExtra("EXTRA_MOTIVO") ?: ""
+        if (intent == null || !::tvStatus.isInitialized) return START_NOT_STICKY
 
-            if (!::tvStatus.isInitialized) {
-                Log.w(TAG, "onStartCommand llegó antes de que la vista esté lista, se ignora este evento")
-                return START_NOT_STICKY
-            }
+        val level = intent.getStringExtra("EXTRA_PROFITABILITY_LEVEL") ?: "RED"
+        val zone = intent.getStringExtra("EXTRA_ZONE_LABEL").orEmpty()
 
-            tvStatus.text = if (isProfitable) "¡VIAJE RENTABLE! ✓" else "VIAJE NO RENTABLE ✕"
-            floatingView?.setBackgroundColor(if (isProfitable) 0xFF2E7D32.toInt() else 0xFFC62828.toInt())
-
-            tvPrice.text = "Precio: $${String.format("%.0f", price)}"
-            tvPricePerKm.text = "Tarifa/Km: $${String.format("%.2f", rateKm)}"
-            tvPricePerHour.text = "Tarifa/Hora: $${String.format("%.2f", rateHour)}"
-            tvTripDetails.text = "Distancia: ${String.format("%.1f", km)} km | Duración: ${String.format("%.0f", minutes)} min"
-
-            tvPickup.text = if (pickup.isNotBlank()) "Recogida: $pickup" else "Recogida: -"
-            tvDestination.text = if (destination.isNotBlank()) "Destino: $destination" else "Destino: -"
-
-            if (motivo == "ZONA_EXCLUIDA" || zoneDest.isNotEmpty() || zonePickup.isNotEmpty()) {
-                val zonaAfectada = if (zoneDest.isNotEmpty()) zoneDest else zonePickup
-                tvForbiddenZoneWarning.visibility = View.VISIBLE
-                tvForbiddenZoneWarning.text = "⚠ Zona no deseada: $zonaAfectada"
-            } else {
-                tvForbiddenZoneWarning.visibility = View.GONE
-            }
+        val (title, background) = when (level) {
+            "GREEN" -> "RENTABLE" to Color.rgb(46, 125, 50)
+            "YELLOW" -> "CASI RENTABLE" to Color.rgb(245, 166, 35)
+            "ZONE" -> "ZONA NO DESEADA" to Color.rgb(198, 40, 40)
+            else -> "NO RENTABLE" to Color.rgb(198, 40, 40)
         }
+
+        tvStatus.text = title
+        tvZone.visibility = if (level == "ZONE") View.VISIBLE else View.GONE
+        tvZone.text = if (zone.isNotBlank()) zone else "Zona excluida"
+
+        val backgroundDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(18).toFloat()
+            setColor(background)
+        }
+        floatingView?.background = backgroundDrawable
+
+        Log.d(TAG, "OVERLAY visible: $level")
         return START_NOT_STICKY
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun iniciarComoForegroundService() {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -148,7 +122,8 @@ class TripOverlayService : Service() {
 
         val notification = NotificationCompat.Builder(this, FGS_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("LoVale está mostrando la evaluación del viaje")
+            .setContentTitle("LoVale")
+            .setContentText("Evaluando viaje")
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
 
@@ -169,7 +144,6 @@ class TripOverlayService : Service() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         if (floatingView != null) {
             try {
                 windowManager?.removeView(floatingView)
@@ -178,5 +152,6 @@ class TripOverlayService : Service() {
             }
             floatingView = null
         }
+        super.onDestroy()
     }
 }
