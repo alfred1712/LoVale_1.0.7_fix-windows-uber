@@ -1,11 +1,7 @@
 package com.example.lovale2.ui
 
-import android.app.Activity
 import android.content.Intent
 import android.provider.Settings
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -20,14 +16,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.lovale2.data.settings.RideApp
-import com.example.lovale2.services.ScreenCaptureHolder
 
 @Composable
 fun MainScreen(
@@ -48,27 +42,6 @@ fun MainScreen(
     val backgroundDark = Color(0xFF070D15)
     val cardBackground = Color(0xFF0E1726)
     val borderColor = Color(0xFF1E2D4A)
-
-    val context = LocalContext.current
-
-    val mediaProjectionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            // Guardamos el permiso concedido
-            ScreenCaptureHolder.resultCode = result.resultCode
-            ScreenCaptureHolder.resultData = result.data
-            ScreenCaptureHolder.isCapturing = true
-
-            Toast.makeText(context, "¡Captura OCR activada!", Toast.LENGTH_SHORT).show()
-
-            // Encendemos automáticamente el servicio principal
-            viewModel.toggleService(true)
-        } else {
-            Toast.makeText(context, "Permiso de captura denegado", Toast.LENGTH_SHORT).show()
-            viewModel.toggleService(false)
-        }
-    }
 
     Column(
         modifier = Modifier.fillMaxSize().background(backgroundDark).padding(16.dp),
@@ -120,9 +93,7 @@ fun MainScreen(
                     Text("El servicio de accesibilidad no está activado", color = Color(0xFFFF8A80), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text("Sin esto, la app no puede leer las pantallas de Uber/Cabify/DiDi.", color = Color(0xFF8A99AD), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = onOpenAccessibilitySettings) {
-                        Text("Habilitar ahora")
-                    }
+                    Button(onClick = onOpenAccessibilitySettings) { Text("Habilitar ahora") }
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
@@ -143,20 +114,6 @@ fun MainScreen(
             }
             Spacer(modifier = Modifier.height(10.dp))
         }
-
-        // Botón para activar la captura OCR en pantalla ubicado justo encima del servicio principal
-        Button(
-            onClick = {
-                val mediaProjectionManager = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-                mediaProjectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = primaryCyan)
-        ) {
-            Text("Activar Captura OCR (Uber/DiDi)", color = Color.Black, fontWeight = FontWeight.Bold)
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
 
         Card(
             modifier = Modifier.fillMaxWidth(),
