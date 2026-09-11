@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -38,10 +39,11 @@ import java.util.concurrent.Executor
  * LoVale 1.0.8
  *
  * Detección híbrida:
- * 1) Accessibility tree como vía principal para todas las plataformas.
- * 2) Para Uber, si Accessibility no entrega una oferta válida, se toma un screenshot
- *    mediante AccessibilityService.takeScreenshot() y se procesa con ML Kit OCR.
- * 3) Ambos caminos terminan en el mismo parser/evaluador y deduplicador.
+ * - Accessibility tree como vía principal.
+ * - Uber usa screenshot+OCR solo como fallback cuando el árbol no contiene una oferta válida.
+ * - Android 14+: se captura exclusivamente la ventana de Uber.
+ * - Android 11-13: Android solo permite screenshot de display; inmediatamente se recorta
+ *   al bounds de la ventana de Uber antes de entregar la imagen a ML Kit.
  */
 class TripAccessibilityService : AccessibilityService() {
 
@@ -49,7 +51,7 @@ class TripAccessibilityService : AccessibilityService() {
         private const val TAG = "LoVale"
         private const val ALERT_CHANNEL_ID = "viajes_channel_id"
         private const val ALERT_NOTIFICATION_ID = 1001
-        private const val OCR_COOLDOWN_MS = 900L
+        private const val OCR_COOLDOWN_MS = 1000L
     }
 
     private val serviceJob = SupervisorJob()
@@ -67,6 +69,8 @@ class TripAccessibilityService : AccessibilityService() {
     private var estadoPrimerPlano = ""
     private var ultimoTextoLogueado = ""
     private var ultimoOcrLogueado = ""
+    private var lastUberWindowId = -1
+    private var lastUberWindowBounds: Rect? = null
     private val ofertasProcesadas = LinkedHashMap<String, Long>()
 
     override fun onServiceConnected() {
@@ -86,6 +90,8 @@ class TripAccessibilityService : AccessibilityService() {
                     estadoPrimerPlano = ""
                     ultimoTextoLogueado = ""
                     ultimoOcrLogueado = ""
+                    lastUberWindowId = -1
+                    lastUberWindowBounds = null
                 }
 
                 actualizarFiltroDePaquete(settings.selectedApp)
@@ -105,6 +111,16 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        try {
+            manejarEvento(event)
+        } catch (t: Throwable) {
+            // Nunca dejamos que un evento malformado o una ventana problemática mate el servicio.
+            Log.e(TAG, "EVENT error no fatal: type=${event.eventType} pkg=${event.packageName}", t)
+            ocrInProgress = false
+        }
+    }
+
+    private fun manejarEvento(event: AccessibilityEvent) {
         val settings = settingsCache
         val selectedApp = settings.selectedApp ?: return
         if (!settings.serviceActive) return
@@ -113,25 +129,42 @@ class TripAccessibilityService : AccessibilityService() {
         val eventPackage = event.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
         if (eventPackage != targetPackage) return
 
+        if (selectedApp == RideApp.UBER && event.windowId >= 0) {
+            lastUberWindowId = event.windowId
+        }
+
         val textos = mutableListOf<String>()
         val ventanasDelPaquete = try {
             windows?.filter { window ->
                 val pkg = window.root?.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
                 pkg == targetPackage
             } ?: emptyList()
-        } catch (_: Exception) {
+        } catch (t: Throwable) {
+            Log.w(TAG, "No se pudieron enumerar ventanas de $targetPackage", t)
             emptyList()
         }
 
         if (ventanasDelPaquete.isNotEmpty()) {
             registrarCambioPrimerPlano(targetPackage)
+
             for (ventana in ventanasDelPaquete) {
+                if (selectedApp == RideApp.UBER) {
+                    if (ventana.id >= 0) lastUberWindowId = ventana.id
+                    val bounds = Rect()
+                    try {
+                        ventana.getBoundsInScreen(bounds)
+                        if (!bounds.isEmpty) lastUberWindowBounds = Rect(bounds)
+                    } catch (_: Throwable) {
+                        // El OCR sigue funcionando con fallback de display si no hay bounds.
+                    }
+                }
+
                 val root = ventana.root ?: continue
                 try {
                     recolectarTextos(root, textos)
                 } finally {
                     @Suppress("DEPRECATION")
-                    root.recycle()
+                    try { root.recycle() } catch (_: Throwable) {}
                 }
             }
         } else {
@@ -141,7 +174,7 @@ class TripAccessibilityService : AccessibilityService() {
                 if (rootPackage.isNotBlank() && rootPackage != targetPackage) {
                     registrarCambioPrimerPlano("")
                     @Suppress("DEPRECATION")
-                    rootNode.recycle()
+                    try { rootNode.recycle() } catch (_: Throwable) {}
                     return
                 }
 
@@ -150,7 +183,7 @@ class TripAccessibilityService : AccessibilityService() {
                     recolectarTextos(rootNode, textos)
                 } finally {
                     @Suppress("DEPRECATION")
-                    rootNode.recycle()
+                    try { rootNode.recycle() } catch (_: Throwable) {}
                 }
             }
         }
@@ -162,8 +195,6 @@ class TripAccessibilityService : AccessibilityService() {
             source = "A11Y"
         )
 
-        // Uber puede dibujar la tarjeta en Canvas/Surface y no exponerla en el árbol.
-        // Si Accessibility no produjo una oferta válida, activamos el fallback visual.
         if (selectedApp == RideApp.UBER && !ofertaEncontrada) {
             solicitarOcrUber(targetPackage)
         }
@@ -177,7 +208,7 @@ class TripAccessibilityService : AccessibilityService() {
     ): Boolean {
         if (textos.isEmpty()) {
             if (selectedApp == RideApp.UBER && source == "A11Y") {
-                Log.d(TAG, "UBER/A11Y sin texto útil; se evaluará fallback OCR")
+                Log.d(TAG, "UBER/A11Y sin texto útil; fallback OCR")
             }
             return false
         }
@@ -190,11 +221,11 @@ class TripAccessibilityService : AccessibilityService() {
 
         if (source == "OCR") {
             if (textoCompleto != ultimoOcrLogueado) {
-                Log.d(TAG, "UBER/OCR (${textoCompleto.length} chars): ${textoCompleto.take(700)}")
+                Log.d(TAG, "UBER/OCR (${textoCompleto.length} chars): ${textoCompleto.take(900)}")
                 ultimoOcrLogueado = textoCompleto
             }
         } else if (textoCompleto != ultimoTextoLogueado) {
-            Log.d(TAG, "$source [${selectedApp.label}] (${textoCompleto.length} chars): ${textoCompleto.take(600)}")
+            Log.d(TAG, "$source [${selectedApp.label}] (${textoCompleto.length} chars): ${textoCompleto.take(700)}")
             ultimoTextoLogueado = textoCompleto
         }
 
@@ -206,9 +237,7 @@ class TripAccessibilityService : AccessibilityService() {
         Log.d(TAG, "${selectedApp.label}/$source: ${ofertas.size} oferta(s) candidata(s)")
         var algunaValida = false
         for (oferta in ofertas) {
-            if (procesarOferta(targetPackage, selectedApp, oferta, source)) {
-                algunaValida = true
-            }
+            if (procesarOferta(targetPackage, selectedApp, oferta, source)) algunaValida = true
         }
         return algunaValida
     }
@@ -224,38 +253,89 @@ class TripAccessibilityService : AccessibilityService() {
 
         lastOcrAt = now
         ocrInProgress = true
-        Log.d(TAG, "UBER/OCR solicitando screenshot")
 
-        takeScreenshot(
-            Display.DEFAULT_DISPLAY,
-            mainExecutor,
-            object : TakeScreenshotCallback {
-                override fun onSuccess(screenshot: ScreenshotResult) {
-                    val hardwareBuffer = screenshot.hardwareBuffer
-                    val bitmap = try {
-                        Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
-                            ?.copy(Bitmap.Config.ARGB_8888, false)
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "UBER/OCR error convirtiendo screenshot", t)
-                        null
-                    } finally {
-                        hardwareBuffer.close()
-                    }
-
-                    if (bitmap == null) {
-                        ocrInProgress = false
-                        return
-                    }
-
-                    procesarScreenshotUber(bitmap, targetPackage)
-                }
-
-                override fun onFailure(errorCode: Int) {
-                    ocrInProgress = false
-                    Log.w(TAG, "UBER/OCR takeScreenshot falló, code=$errorCode")
-                }
+        val callback = object : TakeScreenshotCallback {
+            override fun onSuccess(screenshot: ScreenshotResult) {
+                manejarScreenshotUber(screenshot, targetPackage)
             }
-        )
+
+            override fun onFailure(errorCode: Int) {
+                ocrInProgress = false
+                Log.w(TAG, "UBER/OCR screenshot falló, code=$errorCode windowId=$lastUberWindowId")
+            }
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && lastUberWindowId >= 0) {
+                Log.d(TAG, "UBER/OCR capturando solo ventana Uber id=$lastUberWindowId")
+                takeScreenshotOfWindow(lastUberWindowId, mainExecutor, callback)
+            } else {
+                Log.d(TAG, "UBER/OCR capturando display; OCR se recortará a ventana Uber")
+                @Suppress("DEPRECATION")
+                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback)
+            }
+        } catch (t: Throwable) {
+            // Esta llamada puede lanzar SecurityException/IllegalStateException si el servicio
+            // no se reactivó tras cambiar canTakeScreenshot o el OEM bloquea la captura.
+            ocrInProgress = false
+            Log.e(TAG, "UBER/OCR no se pudo iniciar screenshot; reactivar Accesibilidad puede ser necesario", t)
+        }
+    }
+
+    private fun manejarScreenshotUber(screenshot: ScreenshotResult, targetPackage: String) {
+        val hardwareBuffer = screenshot.hardwareBuffer
+        val bitmap = try {
+            Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
+                ?.copy(Bitmap.Config.ARGB_8888, false)
+        } catch (t: Throwable) {
+            Log.e(TAG, "UBER/OCR error convirtiendo screenshot", t)
+            null
+        } finally {
+            try { hardwareBuffer.close() } catch (_: Throwable) {}
+        }
+
+        if (bitmap == null) {
+            ocrInProgress = false
+            return
+        }
+
+        val region = try {
+            prepararRegionUber(bitmap)
+        } catch (t: Throwable) {
+            Log.w(TAG, "UBER/OCR no se pudo recortar; usando bitmap recibido", t)
+            bitmap
+        }
+
+        if (region !== bitmap) bitmap.recycle()
+        procesarScreenshotUber(region, targetPackage)
+    }
+
+    /**
+     * En Android 11-13 takeScreenshot captura el display. Esta función limita el OCR
+     * a la ventana de Uber conocida por Accessibility y además descarta una franja mínima
+     * superior/inferior para evitar barra de estado/navegación.
+     */
+    private fun prepararRegionUber(bitmap: Bitmap): Bitmap {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && lastUberWindowId >= 0) {
+            // takeScreenshotOfWindow ya devolvió únicamente la ventana de Uber.
+            return bitmap
+        }
+
+        val bounds = lastUberWindowBounds
+        if (bounds == null || bounds.isEmpty) {
+            // Fallback conservador: se evita status bar y navegación, sin depender de una
+            // posición concreta de la tarjeta para soportar variantes de Uber.
+            val top = (bitmap.height * 0.06f).toInt().coerceAtLeast(0)
+            val bottom = (bitmap.height * 0.96f).toInt().coerceAtMost(bitmap.height)
+            return Bitmap.createBitmap(bitmap, 0, top, bitmap.width, (bottom - top).coerceAtLeast(1))
+        }
+
+        val left = bounds.left.coerceIn(0, bitmap.width - 1)
+        val top = bounds.top.coerceIn(0, bitmap.height - 1)
+        val right = bounds.right.coerceIn(left + 1, bitmap.width)
+        val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
+
+        return Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
     }
 
     private fun procesarScreenshotUber(bitmap: Bitmap, targetPackage: String) {
@@ -264,33 +344,43 @@ class TripAccessibilityService : AccessibilityService() {
             .addOnSuccessListener { visionText ->
                 val normalized = normalizarTextoOcr(visionText.text)
                 if (normalized.isBlank()) {
-                    Log.d(TAG, "UBER/OCR screenshot sin texto reconocido")
+                    Log.d(TAG, "UBER/OCR ventana sin texto reconocido")
                 } else {
-                    procesarTextoDePantalla(
+                    val parsed = procesarTextoDePantalla(
                         textos = listOf(normalized),
                         selectedApp = RideApp.UBER,
                         targetPackage = targetPackage,
                         source = "OCR"
                     )
+                    if (!parsed) Log.d(TAG, "UBER/OCR texto detectado pero no formó una oferta válida")
                 }
             }
             .addOnFailureListener { error ->
                 Log.e(TAG, "UBER/OCR ML Kit falló", error)
             }
             .addOnCompleteListener {
-                bitmap.recycle()
+                try { bitmap.recycle() } catch (_: Throwable) {}
                 ocrInProgress = false
             }
     }
 
-    private fun normalizarTextoOcr(raw: String): String = raw
-        .replace('\u00A0', ' ')
-        .replace(Regex("(?i)A\\s*R\\s*S"), "ARS")
-        .replace(Regex("(?i)k\\s*m"), "km")
-        .replace(Regex("(?i)m\\s*i\\s*n"), "min")
-        .replace(Regex("[\\r\\n]+"), " ")
-        .replace(Regex("\\s+"), " ")
-        .trim()
+    private fun normalizarTextoOcr(raw: String): String {
+        var value = raw
+            .replace('\u00A0', ' ')
+            .replace(Regex("(?i)A\\s*R\\s*S"), "ARS")
+            .replace(Regex("(?i)k\\s*m"), "km")
+            .replace(Regex("(?i)m\\s*[i1l]\\s*n"), "min")
+            .replace(Regex("[\\r\\n]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        // OCR suele separar miles: "ARS 6 084" / "$ 6 084".
+        value = value.replace(
+            Regex("(?i)(ARS|\\$)\\s*([0-9]{1,3})\\s+([0-9]{3})(?![0-9])")
+        ) { match -> "${match.groupValues[1]}${match.groupValues[2]}${match.groupValues[3]}" }
+
+        return value
+    }
 
     private fun registrarCambioPrimerPlano(packageName: String) {
         if (packageName == estadoPrimerPlano) return
@@ -380,12 +470,6 @@ class TripAccessibilityService : AccessibilityService() {
         return true
     }
 
-    /**
-     * GREEN  = cumple 100% de los mínimos configurados.
-     * YELLOW = llega al menos al 85% de ambos mínimos configurados.
-     * RED    = queda por debajo del 85% o excede pickup máximo.
-     * ZONE   = pickup/destino en una zona excluida.
-     */
     private fun clasificarRentabilidad(
         evaluacion: ResultadoEvaluacion,
         datos: DatosViaje,
@@ -501,17 +585,13 @@ class TripAccessibilityService : AccessibilityService() {
         node.contentDescription?.toString()?.let { if (it.isNotBlank()) destino.add(it) }
 
         for (i in 0 until node.childCount) {
-            val child = try {
-                node.getChild(i)
-            } catch (_: Exception) {
-                null
-            }
+            val child = try { node.getChild(i) } catch (_: Throwable) { null }
             child?.let { c ->
                 try {
                     recolectarTextos(c, destino)
                 } finally {
                     @Suppress("DEPRECATION")
-                    c.recycle()
+                    try { c.recycle() } catch (_: Throwable) {}
                 }
             }
         }
@@ -597,7 +677,7 @@ class TripAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         serviceScope.cancel()
-        textRecognizer.close()
+        try { textRecognizer.close() } catch (_: Throwable) {}
         super.onDestroy()
     }
 }
