@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.lovale2"
         minSdk = 24
         targetSdk = 37
-        versionCode = 6
-        versionName = "1.0.8"
+        versionCode = 7
+        versionName = "1.0.8-beta2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
