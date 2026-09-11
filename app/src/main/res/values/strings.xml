@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Lo Vale</string>
+    <string name="accessibility_service_description">Monitorea ofertas de viaje de la plataforma seleccionada cuando está en primer plano</string>
+</resources>
