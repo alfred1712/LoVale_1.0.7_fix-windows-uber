@@ -1,57 +1,31 @@
 package com.example.lovale2.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+private val LoValeColorScheme = darkColorScheme(
+    primary = Copper, onPrimary = Ink,
+    primaryContainer = CopperContainer, onPrimaryContainer = Ivory,
+    secondary = Sky, onSecondary = Ink,
+    secondaryContainer = SkyContainer, onSecondaryContainer = Ivory,
+    tertiary = Ivory, onTertiary = Ink,
+    tertiaryContainer = PanelRaised, onTertiaryContainer = Ivory,
+    background = Ink, onBackground = Ivory,
+    surface = Ink, onSurface = Ivory,
+    surfaceVariant = PanelRaised, onSurfaceVariant = MutedText,
+    surfaceContainerLowest = Ink, surfaceContainerLow = Panel,
+    surfaceContainer = Panel, surfaceContainerHigh = PanelRaised,
+    surfaceContainerHighest = PanelRaised,
+    surfaceDim = Ink, surfaceBright = PanelRaised,
+    outline = Border, outlineVariant = PanelRaised,
+    error = AlertText, onError = Ink,
+    errorContainer = AlertContainer, onErrorContainer = Ivory,
+    inverseSurface = Ivory, inverseOnSurface = Ink, inversePrimary = CopperContainer,
+    surfaceTint = Copper
 )
 
 @Composable
-fun LoValeTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
-    content: @Composable () -> Unit
-) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+fun LoValeTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = LoValeColorScheme, typography = Typography, content = content)
 }

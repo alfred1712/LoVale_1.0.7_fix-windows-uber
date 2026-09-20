@@ -1,0 +1,5 @@
+# Persisted JSON predates R8: preserve field names and reflective constructors.
+-keep class com.example.lovale2.data.settings.OfferRecord { *; }
+-keep class com.example.lovale2.domain.CostEstimate { *; }
+-keep class com.example.lovale2.domain.VehicleCosts { *; }
+-keep class com.example.lovale2.domain.AutoFuelSettings { *; }

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.LoVale" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.LoVale" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/lovale_ink</item>
+        <item name="android:statusBarColor">@color/lovale_ink</item>
+        <item name="android:navigationBarColor">@color/lovale_ink</item>
+        <item name="android:colorAccent">@color/lovale_copper</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

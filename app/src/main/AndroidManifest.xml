@@ -3,19 +3,32 @@
 
     <!-- Permiso requerido para mostrar la ventana flotante sobre otras aplicaciones -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Permisos para el Servicio en Primer Plano y notificaciones persistentes (ubicados correctamente fuera de application) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <queries>
+        <package android:name="com.ubercab.driver" />
+        <package android:name="com.cabify.driver" />
+        <package android:name="com.didiglobal.driver" />
+    </queries>
+
     <application
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/lovale_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="@mipmap/lovale_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.LoVale">
 
@@ -30,6 +43,8 @@
         </activity>
 
         <!-- Servicio de Accesibilidad para leer la pantalla -->
+        <service android:name=".services.JourneyLocationService"
+            android:exported="false" android:foregroundServiceType="location" />
         <service
             android:name=".services.TripAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -61,14 +76,7 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Monitoreo en tiempo real de aplicaciones de viajes para filtrado inteligente de tarifas." />
         </service>
-        <service
-            android:name=".services.TripNotificationListenerService"
-            android:exported="true"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
+
 
     </application>
 

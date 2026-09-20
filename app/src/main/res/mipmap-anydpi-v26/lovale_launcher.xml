@@ -1,0 +1,5 @@
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/lovale_ink" />
+    <foreground android:drawable="@drawable/lovale_logo" />
+    <monochrome android:drawable="@drawable/lovale_monochrome" />
+</adaptive-icon>

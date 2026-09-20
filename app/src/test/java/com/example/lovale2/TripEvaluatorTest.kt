@@ -9,6 +9,20 @@ import org.junit.Test
 
 class TripEvaluatorTest {
 
+    @Test
+    fun tarifasIncluyenPickupEnLasTresPlataformas() {
+        val cases = listOf(
+            Triple("ARS6,084 A 6 min (1.9 km) Viaje: 19 min (8.2 km)", 6084.0 / 10.1, 6084.0 / 25.0 * 60),
+            Triple("$3.686 en app $1.215/km 8 min · 1.9 km 13 min · 3 km", 3686.0 / 4.9, 3686.0 / 21.0 * 60),
+            Triple("$8.100 (10 min 2,9 km) (15 min 6,1 km) Aceptar", 8100.0 / 9.0, 8100.0 / 25.0 * 60)
+        )
+        cases.forEach { (text, expectedKm, expectedHour) ->
+            val result = evaluator.evaluarViaje(evaluator.extraerDatosDeViaje(text), emptyList())
+            assertEquals(expectedKm, result.tarifaPorKm, 0.001)
+            assertEquals(expectedHour, result.tarifaPorHora, 0.001)
+        }
+    }
+
     private val evaluator = TripEvaluator(tarifaMinimaPorKm = 1000.0, tarifaMinimaPorHora = 0.0)
     private val zonasProhibidas = listOf("Retiro", "Constitución", "Once")
 
@@ -119,5 +133,68 @@ class TripEvaluatorTest {
         assertEquals(1.9, datos.pickupDistanceKm, 0.01)
     }
 
-}
+    @Test
+    fun rechazaTresTramosEnUnaLecturaAmbigua() {
+        val data = evaluator.extraerDatosDeViaje("ARS8174 4 min 1.5 km Viaje: 25 min 9 km 2 min 9 m")
+        org.junit.Assert.assertFalse(data.completeReading)
+    }
 
+    @Test
+    fun noEmparejaDistanciasAtraviesandoUnaDireccion() {
+        val data = evaluator.extraerDatosDeViaje("ARS8174 4 min Calle 1.5 km Viaje: 25 min 9 km")
+        org.junit.Assert.assertFalse(data.completeReading)
+    }
+
+    @Test
+    fun importe8174UsaAmbosTramosConMetrosYDecimales() {
+        // Synthetic regression: the user's actual screenshot is still required.
+        val data = evaluator.extraerDatosDeViaje("ARS8,174 A 4 min (509 m) Viaje: 25 min (10.9 km)")
+        assertTrue(data.completeReading)
+        assertEquals(10.9, data.distanciaKm, 0.00001)
+        val result = evaluator.evaluarViaje(data, emptyList())
+        assertEquals(8174.0 / 11.409, result.tarifaPorKm, 0.00001)
+        assertEquals(8174.0 * 60 / 29, result.tarifaPorHora, 0.00001)
+    }
+
+    @Test
+    fun uberPriority8174IncluyeRecogidaSinSumarElAdicional() {
+        val data = evaluator.extraerDatosDeViaje("Uber Priority ARS8,174 Identidad digital verificada 4.92 (1101) " +
+            "+ARS958.00 por inicio de viaje prioritario A4 min (1.5 km) Viel, CABA - Caballito " +
+            "Viaje: 21 min (8.9 km) Necochea 949, CABA - La Boca Viaje disponible")
+        assertTrue(data.completeReading)
+        assertEquals(8174.0, data.precio, .001)
+        assertEquals(8.9, data.distanciaKm, .001)
+        val result = evaluator.evaluarViaje(data, emptyList())
+        assertEquals(8174.0 / 10.4, result.tarifaPorKm, .001)
+        assertEquals(19617.6, result.tarifaPorHora, .001)
+    }
+
+    @Test
+    fun noEvaluaKmLeidosComoMetrosDecimales() {
+        listOf("8.9 m", "8,9m").forEach { unit ->
+            val data = evaluator.extraerDatosDeViaje("ARS8,174 A 4 min (1.5 km) Viaje: 21 min ($unit)")
+            org.junit.Assert.assertFalse(data.completeReading)
+            assertTrue(data.priceDiagnostics.contains("ambiguousUnit=true"))
+        }
+    }
+
+    @Test
+    fun ignoraElNetoDelPropioOverlayEnCapturaCompleta() {
+        val data = evaluator.extraerDatosDeViaje("Neto estimado S $7.696 $5.417/km $19.618/h " +
+            "Uber Priority ARS8,174 A4 min (1.5 km) Viaje: 21 min (8.9 km) " +
+            "+ARS958.00 por inicio de viaje prioritario")
+        assertTrue(data.completeReading)
+        assertEquals(8174.0, data.precio, .001)
+    }
+
+    @Test
+    fun lecturaReal5181ToleraNminSinPerderElViaje() {
+        val data = evaluator.extraerDatosDeViaje("UberX ARS5,181 A4 min (0.6 km) " +
+            "4127 Avenida Rivadavia Viaje: 16 nmin (5.5 km) Avenida Entre Ríos 2144")
+        assertTrue(data.completeReading)
+        val result = evaluator.evaluarViaje(data, emptyList())
+        assertEquals(5181.0 / 6.1, result.tarifaPorKm, .001)
+        assertEquals(15543.0, result.tarifaPorHora, .001)
+    }
+
+}

@@ -7,6 +7,12 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Rect
+import com.example.lovale2.diagnostics.DiagnosticRecorder
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import android.os.SystemClock
+import com.example.lovale2.BuildConfig
+import com.example.lovale2.domain.OfferText
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -24,6 +30,10 @@ import com.example.lovale2.domain.DatosViaje
 import com.example.lovale2.domain.MotivoEvaluacion
 import com.example.lovale2.domain.ResultadoEvaluacion
 import com.example.lovale2.domain.TripEvaluator
+import com.example.lovale2.domain.evaluator
+import com.example.lovale2.domain.classifyOffer
+import com.example.lovale2.data.settings.OfferHistory
+import com.example.lovale2.data.settings.OfferRecord
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -54,8 +64,10 @@ class TripAccessibilityService : AccessibilityService() {
         private const val OCR_COOLDOWN_MS = 1000L
     }
 
+    private val neighborhoods = com.example.lovale2.data.network.UsigNeighborhoods()
+    private val zoneJobs = mutableSetOf<String>()
     private val serviceJob = SupervisorJob()
-    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+    private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + serviceJob)
     private val mainExecutor = Executor { command -> Handler(Looper.getMainLooper()).post(command) }
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -65,24 +77,129 @@ class TripAccessibilityService : AccessibilityService() {
     @Volatile
     private var ocrInProgress = false
 
-    private var lastOcrAt = 0L
+    private val handler = Handler(Looper.getMainLooper())
+    private val completion = com.example.lovale2.domain.CompletedTripTracker()
+    private val summary by lazy { com.example.lovale2.data.settings.SessionSummaryStore.get(this) }
+    private fun completionDecision(decision: com.example.lovale2.domain.CompletedTripTracker.Decision?) {
+        if (decision == null) return
+        val automatic = decision.completed && settingsCache.autoConfirmTrips
+        DiagnosticRecorder.event("trip_completion", "offerId" to decision.id, "automatic" to automatic, "reason" to decision.reason)
+        serviceScope.launch {
+            try { OfferHistory(this@TripAccessibilityService).applyCompletion(decision.id, automatic, decision.reason != "cancelado", decision.reason.startsWith("aceptado"), decision.finalPrice) }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { Log.w(TAG, "HISTORY confirmación falló: ${e.javaClass.simpleName}") }
+        }
+    }
+    private val offerDismissal = com.example.lovale2.domain.OfferDismissal()
+    private var watchingOverlay = false
+    private val checkOverlay = object : Runnable {
+        override fun run() {
+            watchingOverlay = false
+            if (!settingsCache.serviceActive || !TripOverlayService.isOfferVisible()) return
+            if (usesOcrFallback(settingsCache.selectedApp)) {
+                settingsCache.selectedApp?.let { solicitarOcrPlataforma(it.packageName) }
+                watchOverlay()
+            }
+        }
+    }
+    private fun watchOverlay() {
+        if (!watchingOverlay && usesOcrFallback(settingsCache.selectedApp)) {
+            watchingOverlay = true
+            handler.postDelayed(checkOverlay, 1000L)
+        }
+    }
+    private fun closeOffer(reason: String) {
+        suppressUntil = SystemClock.elapsedRealtime() + 800L
+        generation++ // Invalidate screenshots taken before dismissal.
+        offerDismissal.reset()
+        TripOverlayService.dismissOffer(reason)
+    }
+    private var visibleCardActions = emptyList<Pair<Rect, Double>>()
+    private var dismissTargets = emptyList<Rect>()
+    private var dismissTargetsAt = 0L
+    private var suppressUntil = 0L
+    private var centralCards: ArrayList<Intent>? = null
+    private var cardAnchor: com.example.lovale2.domain.OfferCard? = null
+    private val recordIds = linkedMapOf<String, String>()
+    private var generation = 0
+    private var destroyed = false
+    private var referenceInProgress = false
+    private var readId = 0L
+    private var retryPending = false
+    private var lastOcrAt = -OCR_COOLDOWN_MS
+    private var lastTreeFinishedAt = -500L
+    private var pendingEvent: AccessibilityEvent? = null
+    private val readPendingEvent = Runnable {
+        val event = pendingEvent
+        pendingEvent = null
+        if (event != null) {
+            try { manejarEvento(event) }
+            catch (e: Exception) { Log.e(TAG, "${settingsCache.selectedApp?.label}/A11Y lectura falló", e) }
+            finally {
+                lastTreeFinishedAt = SystemClock.elapsedRealtime()
+                @Suppress("DEPRECATION")
+                event.recycle()
+            }
+        }
+    }
+    private fun usesOcrFallback(app: RideApp?) = app == RideApp.UBER || app == RideApp.DIDI
+    private fun ocrPlatformActive() = !destroyed && settingsCache.serviceActive && usesOcrFallback(settingsCache.selectedApp)
+    private fun scheduleRetry() {
+        if (retryPending || !ocrPlatformActive()) return
+        retryPending = true
+        handler.postDelayed({
+            retryPending = false
+            if (ocrPlatformActive()) settingsCache.selectedApp?.let { solicitarOcrPlataforma(it.packageName, false) }
+        }, OCR_COOLDOWN_MS)
+    }
     private var estadoPrimerPlano = ""
     private var ultimoTextoLogueado = ""
     private var ultimoOcrLogueado = ""
-    private var lastUberWindowId = -1
-    private var lastUberWindowBounds: Rect? = null
+    private var lastTargetWindowId = -1
+    private var lastUberEventAt = -10000L
+    private var lastTargetWindowBounds: Rect? = null
     private val ofertasProcesadas = LinkedHashMap<String, Long>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        MonitoringHealth.connected(true)
+        DiagnosticRecorder.initialize(this)
+        serviceScope.launch {
+            DiagnosticRecorder.state.collectLatest { diagnostic ->
+                if (diagnostic.active && diagnostic.visual) {
+                    while (DiagnosticRecorder.active()) {
+                        captureDiagnosticReference()
+                        delay(5000L)
+                    }
+                }
+            }
+        }
+        if (Settings.canDrawOverlays(this)) {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(ALERT_NOTIFICATION_ID)
+        }
         Log.d(TAG, "Servicio de accesibilidad CONECTADO - LoVale 1.0.8")
 
         actualizarFiltroDePaquete(settingsCache.selectedApp)
+        Log.d(TAG, "${settingsCache.selectedApp?.label}/A11Y conectado sdk=" + Build.VERSION.SDK_INT + " capabilities=" + serviceInfo?.capabilities)
 
         val repository = SettingsRepository(applicationContext)
         serviceScope.launch {
             repository.settingsFlow.collect { settings ->
                 val appCambio = settings.selectedApp != settingsCache.selectedApp
+                if (appCambio || settings.serviceActive != settingsCache.serviceActive) {
+                    if (appCambio || !settings.serviceActive) DiagnosticRecorder.stop("pausa o cambio de plataforma")
+                    // Keep accepted-trip evidence while the driver switches platforms. It expires independently.
+                    MonitoringHealth.paused()
+                    generation++
+                    watchingOverlay = false
+                    offerDismissal.reset()
+                    TripOverlayService.dismissOffer("pausa o cambio de plataforma")
+                    handler.removeCallbacksAndMessages(null)
+                    @Suppress("DEPRECATION")
+                    pendingEvent?.recycle()
+                    pendingEvent = null
+                    retryPending = false
+                }
                 settingsCache = settings
 
                 if (appCambio) {
@@ -90,8 +207,8 @@ class TripAccessibilityService : AccessibilityService() {
                     estadoPrimerPlano = ""
                     ultimoTextoLogueado = ""
                     ultimoOcrLogueado = ""
-                    lastUberWindowId = -1
-                    lastUberWindowBounds = null
+                    lastTargetWindowId = -1
+                    lastTargetWindowBounds = null
                 }
 
                 actualizarFiltroDePaquete(settings.selectedApp)
@@ -111,12 +228,57 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        if (settingsCache.serviceActive && event.packageName?.toString() == settingsCache.selectedApp?.packageName) {
+            MonitoringHealth.event()
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED && TripOverlayService.isCenterVisible()) closeOffer("lista desplazada")
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+                try {
+                    val node = event.source
+                    val clicked = Rect()
+                    node?.getBoundsInScreen(clicked)
+                    val visualClose = !clicked.isEmpty && SystemClock.elapsedRealtime() - dismissTargetsAt < 5000 &&
+                        dismissTargets.any { it.contains(clicked.centerX(), clicked.centerY()) }
+                    var cardFare: Double? = if (SystemClock.elapsedRealtime() - dismissTargetsAt < 5000)
+                        visibleCardActions.filter { it.first.contains(clicked.centerX(),clicked.centerY()) }.singleOrNull()?.second else null
+                    var parent = node?.parent
+                    repeat(4) {
+                        val current = parent
+                        if (current != null) {
+                            val texts = mutableListOf<String>()
+                            recolectarTextos(current, texts, TreeBudget(SystemClock.elapsedRealtime() + 15, true))
+                            val candidate = TripEvaluator(0.0, 0.0).extraerDatosDeViaje(texts.joinToString(" "))
+                            if (candidate.completeReading && cardFare == null) cardFare = candidate.precio
+                            parent = if (cardFare == null) current.parent else null
+                            @Suppress("DEPRECATION") current.recycle()
+                        }
+                    }
+                    @Suppress("DEPRECATION") parent?.recycle()
+                    val labels = try { event.text.map { it.toString() } + listOfNotNull(node?.text?.toString(), node?.contentDescription?.toString(), node?.viewIdResourceName?.substringAfterLast('/')?.takeIf { it.contains("close", true) || it.contains("reject", true) }?.let { "cerrar" }) }
+                        finally { @Suppress("DEPRECATION") node?.recycle() }
+                    completion.click(event.packageName.toString(), labels, SystemClock.elapsedRealtime(), cardFare)?.let {
+                        completionDecision(com.example.lovale2.domain.CompletedTripTracker.Decision(it, false, "aceptado; final pendiente"))
+                    }
+                    if (TripOverlayService.isOfferVisible() && (visualClose || labels.any { com.example.lovale2.domain.OfferDismissal.isCloseAction(it) || it.trim().lowercase() in setOf("aceptar", "me interesa") })) closeOffer("rechazo/cierre de oferta")
+                } catch (e: Exception) { Log.w(TAG, "A11Y acción no legible: ${e.javaClass.simpleName}") }
+            }
+        }
+        if (settingsCache.serviceActive &&
+            event.packageName?.toString() == settingsCache.selectedApp?.packageName) {
+            // Coalesce bursts BEFORE walking nodes, leaving the main queue free for OCR callbacks.
+            val hadPending = pendingEvent != null
+            @Suppress("DEPRECATION")
+            pendingEvent?.recycle()
+            @Suppress("DEPRECATION")
+            pendingEvent = AccessibilityEvent.obtain(event)
+            if (!hadPending) handler.postDelayed(readPendingEvent,
+                (500L - (SystemClock.elapsedRealtime() - lastTreeFinishedAt)).coerceAtLeast(0L))
+            return
+        }
         try {
             manejarEvento(event)
         } catch (t: Throwable) {
             // Nunca dejamos que un evento malformado o una ventana problemática mate el servicio.
             Log.e(TAG, "EVENT error no fatal: type=${event.eventType} pkg=${event.packageName}", t)
-            ocrInProgress = false
         }
     }
 
@@ -127,16 +289,22 @@ class TripAccessibilityService : AccessibilityService() {
 
         val targetPackage = selectedApp.packageName
         val eventPackage = event.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+        if (BuildConfig.DEBUG) Log.d(TAG, "${settingsCache.selectedApp?.label}/A11Y EVENT type=" + event.eventType + " window=" + event.windowId + " match=" + (eventPackage == targetPackage))
         if (eventPackage != targetPackage) return
 
-        if (selectedApp == RideApp.UBER && event.windowId >= 0) {
-            lastUberWindowId = event.windowId
+        if (usesOcrFallback(selectedApp) && event.windowId >= 0) {
+            lastTargetWindowId = event.windowId
+            lastUberEventAt = SystemClock.elapsedRealtime()
         }
 
         val textos = mutableListOf<String>()
+        val treeStartedAt = SystemClock.elapsedRealtime()
+        val budget = TreeBudget(treeStartedAt + 100L, enabled = true)
         val ventanasDelPaquete = try {
             windows?.filter { window ->
-                val pkg = window.root?.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+                val root = window.root
+                val pkg = try { root?.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty() }
+                    finally { @Suppress("DEPRECATION") root?.recycle() }
                 pkg == targetPackage
             } ?: emptyList()
         } catch (t: Throwable) {
@@ -148,12 +316,12 @@ class TripAccessibilityService : AccessibilityService() {
             registrarCambioPrimerPlano(targetPackage)
 
             for (ventana in ventanasDelPaquete) {
-                if (selectedApp == RideApp.UBER) {
-                    if (ventana.id >= 0) lastUberWindowId = ventana.id
+                if (usesOcrFallback(selectedApp)) {
+                    if (ventana.id >= 0) lastTargetWindowId = ventana.id
                     val bounds = Rect()
                     try {
                         ventana.getBoundsInScreen(bounds)
-                        if (!bounds.isEmpty) lastUberWindowBounds = Rect(bounds)
+                        if (!bounds.isEmpty) lastTargetWindowBounds = Rect(bounds)
                     } catch (_: Throwable) {
                         // El OCR sigue funcionando con fallback de display si no hay bounds.
                     }
@@ -161,7 +329,7 @@ class TripAccessibilityService : AccessibilityService() {
 
                 val root = ventana.root ?: continue
                 try {
-                    recolectarTextos(root, textos)
+                    recolectarTextos(root, textos, budget)
                 } finally {
                     @Suppress("DEPRECATION")
                     try { root.recycle() } catch (_: Throwable) {}
@@ -171,7 +339,7 @@ class TripAccessibilityService : AccessibilityService() {
             val rootNode = rootInActiveWindow
             if (rootNode != null) {
                 val rootPackage = rootNode.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
-                if (rootPackage.isNotBlank() && rootPackage != targetPackage) {
+                if (rootPackage != targetPackage) {
                     registrarCambioPrimerPlano("")
                     @Suppress("DEPRECATION")
                     try { rootNode.recycle() } catch (_: Throwable) {}
@@ -180,7 +348,7 @@ class TripAccessibilityService : AccessibilityService() {
 
                 registrarCambioPrimerPlano(targetPackage)
                 try {
-                    recolectarTextos(rootNode, textos)
+                    recolectarTextos(rootNode, textos, budget)
                 } finally {
                     @Suppress("DEPRECATION")
                     try { rootNode.recycle() } catch (_: Throwable) {}
@@ -188,6 +356,10 @@ class TripAccessibilityService : AccessibilityService() {
             }
         }
 
+        Log.d(TAG, "A11Y extracción ms=" + (SystemClock.elapsedRealtime() - treeStartedAt) +
+            " nodes=" + budget.nodes + " limitada=" + budget.limited)
+        DiagnosticRecorder.event("a11y_tree", "ms" to (SystemClock.elapsedRealtime() - treeStartedAt),
+            "nodes" to budget.nodes, "limited" to budget.limited, "texts" to textos.size)
         val ofertaEncontrada = procesarTextoDePantalla(
             textos = textos,
             selectedApp = selectedApp,
@@ -195,8 +367,8 @@ class TripAccessibilityService : AccessibilityService() {
             source = "A11Y"
         )
 
-        if (selectedApp == RideApp.UBER && !ofertaEncontrada) {
-            solicitarOcrUber(targetPackage)
+        if (usesOcrFallback(selectedApp) && !ofertaEncontrada) {
+            solicitarOcrPlataforma(targetPackage)
         }
     }
 
@@ -207,30 +379,44 @@ class TripAccessibilityService : AccessibilityService() {
         source: String
     ): Boolean {
         if (textos.isEmpty()) {
-            if (selectedApp == RideApp.UBER && source == "A11Y") {
-                Log.d(TAG, "UBER/A11Y sin texto útil; fallback OCR")
+            if (usesOcrFallback(selectedApp) && source == "A11Y") {
+                Log.d(TAG, "${settingsCache.selectedApp?.label}/A11Y sin texto útil; fallback OCR")
             }
             return false
         }
 
-        val textoCompleto = textos.joinToString(" ")
+        val textoCompleto = OfferText.normalize(textos.joinToString(" "))
             .replace(Regex("\\s+"), " ")
             .trim()
 
         if (textoCompleto.isBlank()) return false
 
-        if (source == "OCR") {
-            if (textoCompleto != ultimoOcrLogueado) {
-                Log.d(TAG, "UBER/OCR (${textoCompleto.length} chars): ${textoCompleto.take(900)}")
-                ultimoOcrLogueado = textoCompleto
+        readId++
+        DiagnosticRecorder.event("read", "readId" to readId, "source" to source, "chars" to textoCompleto.length)
+        DiagnosticRecorder.text(source, textos.joinToString("\n"))
+
+        completionDecision(completion.observe(targetPackage, textoCompleto, SystemClock.elapsedRealtime()))
+        // A receipt is not a new offer. Allow the existing bounded OCR retry to corroborate its final amount.
+        if (completion.isFinalScreen(textoCompleto)) return !completion.awaitingFinal
+        val candidate = esPantallaDeOfertas(selectedApp, textoCompleto)
+        // Uber/DiDi may expose only the waiting screen through A11Y while an offer is drawn.
+        if ((source == "OCR" || !usesOcrFallback(selectedApp)) && TripOverlayService.isOfferVisible() &&
+            offerDismissal.observe(textoCompleto, candidate)) closeOffer("oferta desaparecida; dos lecturas de espera")
+        DiagnosticRecorder.event("detector", "readId" to readId, "candidate" to candidate)
+        if (!candidate) {
+            Log.d(TAG, "PARSE detector rechazó source=" + source + " chars=" + textoCompleto.length)
+            // Señal conservadora de tarjeta parcial, nunca se evalúa como viaje completo.
+            if ((source == "OCR" || !usesOcrFallback(selectedApp)) &&
+                Regex("(?:ARS|\\$)\\s*[0-9]", RegexOption.IGNORE_CASE).containsMatchIn(textoCompleto) &&
+                Regex("\\b(?:Aceptar|Viaje|recogida)\\b", RegexOption.IGNORE_CASE).containsMatchIn(textoCompleto) &&
+                contarParesMinKm(textoCompleto) == 1) {
+                procesarOferta(targetPackage, selectedApp, textoCompleto, source)
             }
-        } else if (textoCompleto != ultimoTextoLogueado) {
-            Log.d(TAG, "$source [${selectedApp.label}] (${textoCompleto.length} chars): ${textoCompleto.take(700)}")
-            ultimoTextoLogueado = textoCompleto
+            return false
         }
 
-        if (!esPantallaDeOfertas(selectedApp, textoCompleto)) return false
-
+        if (source == "A11Y" && selectedApp == RideApp.DIDI && textoCompleto.contains("Centro de viajes", true) && Build.VERSION.SDK_INT >= 30) return false
+        if (centralCards == null) completion.clearVisibleOffers()
         val ofertas = separarOfertas(textoCompleto, selectedApp)
         if (ofertas.isEmpty()) return false
 
@@ -242,146 +428,216 @@ class TripAccessibilityService : AccessibilityService() {
         return algunaValida
     }
 
-    private fun solicitarOcrUber(targetPackage: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Log.d(TAG, "UBER/OCR no disponible: Android < 11")
+    private data class TargetWindow(val id: Int, val bounds: Rect)
+    private fun currentTargetWindow(allowCached: Boolean = true): TargetWindow? = try {
+        windows.orEmpty().firstNotNullOfOrNull { window ->
+            val root = window.root
+            val pkg = try { root?.packageName?.toString() } finally {
+                @Suppress("DEPRECATION")
+                root?.recycle()
+            }
+            if (pkg == settingsCache.selectedApp?.packageName ||
+                (allowCached && pkg == null && window.id == lastTargetWindowId && window.isActive &&
+                    SystemClock.elapsedRealtime() - lastUberEventAt < 2500L)) {
+                val bounds = Rect()
+                window.getBoundsInScreen(bounds)
+                if (!bounds.isEmpty) TargetWindow(window.id, bounds) else null
+            } else null
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "${settingsCache.selectedApp?.label}/OCR ventana no verificable", e)
+        null
+    }
+
+    /** Independent reference: no detector gate and no additional OCR. Window API only. */
+    private fun captureDiagnosticReference() {
+        if (!DiagnosticRecorder.visualEnabled() || !settingsCache.serviceActive || Build.VERSION.SDK_INT < 34) return
+        val platform = settingsCache.selectedApp?.packageName ?: return
+        if (platform != DiagnosticRecorder.state.value.packageName) return
+        val sessionId = DiagnosticRecorder.sessionId()
+        if (ocrInProgress || referenceInProgress || !getSystemService(android.os.PowerManager::class.java).isInteractive ||
+            getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) {
+            DiagnosticRecorder.event("reference_skipped", "reason" to "ocupado/pantalla bloqueada")
             return
         }
+        val window = currentTargetWindow(allowCached = false)
+        if (window == null) {
+            DiagnosticRecorder.event("reference_skipped", "reason" to "ventana no verificable")
+            return
+        }
+        val token = generation
+        val at = SystemClock.elapsedRealtime()
+        referenceInProgress = true
+        try {
+            takeScreenshotOfWindow(window.id, mainExecutor, object : TakeScreenshotCallback {
+                override fun onFailure(errorCode: Int) {
+                    referenceInProgress = false
+                    DiagnosticRecorder.event("reference_error", "code" to errorCode)
+                }
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    try {
+                        if (token != generation || sessionId != DiagnosticRecorder.sessionId() ||
+                            !DiagnosticRecorder.visualEnabled() || currentTargetWindow(false)?.id != window.id) return
+                        val hardware = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace) ?: return
+                        try {
+                            if (hardware.width.toLong() * hardware.height > 12_000_000L) {
+                                DiagnosticRecorder.event("reference_skipped", "reason" to "imagen demasiado grande")
+                                return
+                            }
+                            hardware.copy(Bitmap.Config.ARGB_8888, false)?.let { DiagnosticRecorder.image(it, at, platform) }
+                        } finally { hardware.recycle() }
+                    } catch (e: Exception) {
+                        DiagnosticRecorder.event("reference_error", "type" to e.javaClass.simpleName)
+                    } finally { screenshot.hardwareBuffer.close(); referenceInProgress = false }
+                }
+            })
+        } catch (e: Exception) {
+            referenceInProgress = false
+            DiagnosticRecorder.event("reference_error", "type" to e.javaClass.simpleName)
+        }
+    }
 
-        val now = System.currentTimeMillis()
-        if (ocrInProgress || now - lastOcrAt < OCR_COOLDOWN_MS) return
-
-        lastOcrAt = now
+    private fun solicitarOcrPlataforma(targetPackage: String, allowRetry: Boolean = true) {
+        if (!ocrPlatformActive()) return
+        if (!getSystemService(android.os.PowerManager::class.java).isInteractive ||
+            getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR no disponible: Android < 11")
+            return
+        }
+        if (ocrInProgress || referenceInProgress || SystemClock.elapsedRealtime() - lastOcrAt < OCR_COOLDOWN_MS) {
+            Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR diferido busy=" + ocrInProgress)
+            if (allowRetry) scheduleRetry()
+            return
+        }
+        val window = currentTargetWindow()
+        if (window == null) {
+            if (TripOverlayService.isOfferVisible()) closeOffer("plataforma fuera de pantalla")
+            Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR omitido: ventana seleccionada no verificable")
+            if (allowRetry) scheduleRetry()
+            return
+        }
+        lastOcrAt = SystemClock.elapsedRealtime()
         ocrInProgress = true
+        MonitoringHealth.ocrStarted()
+        captureTarget(window, targetPackage, generation,
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE, allowRetry)
+    }
 
-        val callback = object : TakeScreenshotCallback {
-            override fun onSuccess(screenshot: ScreenshotResult) {
-                manejarScreenshotUber(screenshot, targetPackage)
-            }
-
-            override fun onFailure(errorCode: Int) {
+    private fun captureTarget(window: TargetWindow, targetPackage: String, token: Int,
+                            windowCapture: Boolean, allowRetry: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        fun failed(code: Int, error: Throwable? = null) {
+            DiagnosticRecorder.event("screenshot_error", "code" to code, "windowMode" to windowCapture)
+            Log.w(TAG, "${settingsCache.selectedApp?.label}/OCR screenshot fallo windowMode=" + windowCapture + " code=" + code + " id=" + window.id, error)
+            if (windowCapture && code != ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS &&
+                code != ERROR_TAKE_SCREENSHOT_SECURE_WINDOW && ocrPlatformActive() &&
+                token == generation && currentTargetWindow() == window) {
+                Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR fallback display con recorte verificado")
+                captureTarget(window, targetPackage, token, false, allowRetry)
+            } else {
                 ocrInProgress = false
-                Log.w(TAG, "UBER/OCR screenshot falló, code=$errorCode windowId=$lastUberWindowId")
+                MonitoringHealth.ocrFinished(false)
+                if (allowRetry && token == generation) scheduleRetry()
             }
         }
-
+        val callback = object : TakeScreenshotCallback {
+            override fun onFailure(errorCode: Int) = failed(errorCode)
+            override fun onSuccess(screenshot: ScreenshotResult) {
+                var bitmap: Bitmap? = null
+                try {
+                    if (!ocrPlatformActive() || token != generation || currentTargetWindow() != window) {
+                        Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR screenshot descartado: contexto cambió")
+                        ocrInProgress = false
+                        MonitoringHealth.ocrFinished(true)
+                        return
+                    }
+                    val wrapped = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                    bitmap = try { wrapped?.copy(Bitmap.Config.ARGB_8888, false) } finally { wrapped?.recycle() }
+                    val original = bitmap ?: error("Bitmap nulo")
+                    if (!windowCapture) {
+                        val bounds = Rect(window.bounds)
+                        check(bounds.intersect(0, 0, original.width, original.height)) { "Bounds fuera del display" }
+                        val cropped = Bitmap.createBitmap(original, bounds.left, bounds.top, bounds.width(), bounds.height())
+                        if (cropped !== original) original.recycle()
+                        bitmap = cropped
+                    }
+                    val region = bitmap ?: error("Region nula")
+                    Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR screenshot OK windowMode=" + windowCapture + " image=" + region.width + "x" + region.height)
+                    procesarScreenshotPlataforma(region, targetPackage, token, allowRetry)
+                    bitmap = null
+                } catch (e: Exception) {
+                    bitmap?.recycle()
+                    ocrInProgress = false
+                    MonitoringHealth.ocrFinished(false)
+                    Log.e(TAG, "${settingsCache.selectedApp?.label}/OCR imagen inválida", e)
+                } finally { screenshot.hardwareBuffer.close() }
+            }
+        }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && lastUberWindowId >= 0) {
-                Log.d(TAG, "UBER/OCR capturando solo ventana Uber id=$lastUberWindowId")
-                takeScreenshotOfWindow(lastUberWindowId, mainExecutor, callback)
+            Log.d(TAG, "${settingsCache.selectedApp?.label}/OCR screenshot REQUEST windowMode=" + windowCapture + " id=" + window.id)
+            DiagnosticRecorder.event("screenshot_request", "windowMode" to windowCapture, "windowId" to window.id)
+            if (windowCapture && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                takeScreenshotOfWindow(window.id, mainExecutor, callback)
             } else {
-                Log.d(TAG, "UBER/OCR capturando display; OCR se recortará a ventana Uber")
-                @Suppress("DEPRECATION")
                 takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback)
             }
-        } catch (t: Throwable) {
-            // Esta llamada puede lanzar SecurityException/IllegalStateException si el servicio
-            // no se reactivó tras cambiar canTakeScreenshot o el OEM bloquea la captura.
-            ocrInProgress = false
-            Log.e(TAG, "UBER/OCR no se pudo iniciar screenshot; reactivar Accesibilidad puede ser necesario", t)
-        }
+        } catch (e: Exception) { failed(-1, e) }
     }
 
-    private fun manejarScreenshotUber(screenshot: ScreenshotResult, targetPackage: String) {
-        val hardwareBuffer = screenshot.hardwareBuffer
-        val bitmap = try {
-            Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
-                ?.copy(Bitmap.Config.ARGB_8888, false)
-        } catch (t: Throwable) {
-            Log.e(TAG, "UBER/OCR error convirtiendo screenshot", t)
-            null
-        } finally {
-            try { hardwareBuffer.close() } catch (_: Throwable) {}
-        }
-
-        if (bitmap == null) {
-            ocrInProgress = false
-            return
-        }
-
-        val region = try {
-            prepararRegionUber(bitmap)
-        } catch (t: Throwable) {
-            Log.w(TAG, "UBER/OCR no se pudo recortar; usando bitmap recibido", t)
-            bitmap
-        }
-
-        if (region !== bitmap) bitmap.recycle()
-        procesarScreenshotUber(region, targetPackage)
-    }
-
-    /**
-     * En Android 11-13 takeScreenshot captura el display. Esta función limita el OCR
-     * a la ventana de Uber conocida por Accessibility y además descarta una franja mínima
-     * superior/inferior para evitar barra de estado/navegación.
-     */
-    private fun prepararRegionUber(bitmap: Bitmap): Bitmap {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && lastUberWindowId >= 0) {
-            // takeScreenshotOfWindow ya devolvió únicamente la ventana de Uber.
-            return bitmap
-        }
-
-        val bounds = lastUberWindowBounds
-        if (bounds == null || bounds.isEmpty) {
-            // Fallback conservador: se evita status bar y navegación, sin depender de una
-            // posición concreta de la tarjeta para soportar variantes de Uber.
-            val top = (bitmap.height * 0.06f).toInt().coerceAtLeast(0)
-            val bottom = (bitmap.height * 0.96f).toInt().coerceAtMost(bitmap.height)
-            return Bitmap.createBitmap(bitmap, 0, top, bitmap.width, (bottom - top).coerceAtLeast(1))
-        }
-
-        val left = bounds.left.coerceIn(0, bitmap.width - 1)
-        val top = bounds.top.coerceIn(0, bitmap.height - 1)
-        val right = bounds.right.coerceIn(left + 1, bitmap.width)
-        val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
-
-        return Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-    }
-
-    private fun procesarScreenshotUber(bitmap: Bitmap, targetPackage: String) {
-        val image = InputImage.fromBitmap(bitmap, 0)
-        textRecognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                val normalized = normalizarTextoOcr(visionText.text)
-                if (normalized.isBlank()) {
-                    Log.d(TAG, "UBER/OCR ventana sin texto reconocido")
-                } else {
-                    val parsed = procesarTextoDePantalla(
-                        textos = listOf(normalized),
-                        selectedApp = RideApp.UBER,
-                        targetPackage = targetPackage,
-                        source = "OCR"
-                    )
-                    if (!parsed) Log.d(TAG, "UBER/OCR texto detectado pero no formó una oferta válida")
+    private fun procesarScreenshotPlataforma(bitmap: Bitmap, targetPackage: String, token: Int, allowRetry: Boolean) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val expectedWindow = currentTargetWindow()
+        serviceScope.launch {
+            try {
+                val reading = kotlinx.coroutines.withContext(Dispatchers.Default) { OfferOcrReader(textRecognizer).read(bitmap) }
+                MonitoringHealth.ocrFinished(true)
+                val elapsed = SystemClock.elapsedRealtime() - startedAt
+                DiagnosticRecorder.event("ocr_result", "ms" to elapsed, "cards" to reading.cards.size, "refined" to reading.refined)
+                Log.d(TAG, "OCR focalizado ms=$elapsed cards=${reading.cards.size} refined=${reading.refined}")
+                if (!ocrPlatformActive() || token != generation || currentTargetWindow() != expectedWindow || elapsed > 5000L) return@launch
+                val app = settingsCache.selectedApp ?: return@launch
+                dismissTargetsAt = SystemClock.elapsedRealtime()
+                val margin = (resources.displayMetrics.density * 18).toInt()
+                dismissTargets = reading.dismissTargets.map { line -> Rect(line.left, line.top, line.right, line.bottom).apply {
+                    offset(expectedWindow?.bounds?.left ?: 0, expectedWindow?.bounds?.top ?: 0); inset(-margin, -margin)
+                } }
+                visibleCardActions = reading.cards.mapNotNull { card ->
+                    val action = card.action ?: return@mapNotNull null
+                    val data = TripEvaluator(0.0,0.0).extraerDatosDeViaje(card.text)
+                    if (!data.completeReading) return@mapNotNull null
+                    Rect(action.left,action.top,action.right,action.bottom).apply {
+                        offset(expectedWindow?.bounds?.left ?: 0,expectedWindow?.bounds?.top ?: 0); inset(-margin,-margin)
+                    } to data.precio
                 }
-            }
-            .addOnFailureListener { error ->
-                Log.e(TAG, "UBER/OCR ML Kit falló", error)
-            }
-            .addOnCompleteListener {
-                try { bitmap.recycle() } catch (_: Throwable) {}
-                ocrInProgress = false
-            }
+                val parsed = if (reading.cards.isEmpty()) {
+                    procesarTextoDePantalla(listOf(reading.text), app, targetPackage, "OCR")
+                } else {
+                    var all = true
+                    val central = app == RideApp.DIDI && (reading.cards.size > 1 || reading.text.contains("Centro de viajes", true))
+                    completion.clearVisibleOffers()
+                    centralCards = if (central) arrayListOf() else null
+                    try {
+                        for (card in reading.cards) {
+                            cardAnchor = if (central) card else null
+                            if (!procesarTextoDePantalla(listOf(card.text), app, targetPackage, "OCR")) all = false
+                        }
+                        centralCards?.takeIf { it.isNotEmpty() }?.let { batch ->
+                            if (Settings.canDrawOverlays(this@TripAccessibilityService)) ContextCompat.startForegroundService(this@TripAccessibilityService,
+                                Intent(this@TripAccessibilityService, TripOverlayService::class.java).putParcelableArrayListExtra("EXTRA_CARDS", batch))
+                        }
+                    } finally { centralCards = null; cardAnchor = null }
+                    all
+                }
+                if (!parsed && allowRetry) scheduleRetry()
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
+                MonitoringHealth.ocrFinished(false)
+                Log.e(TAG, "OCR lectura focalizada falló", e)
+                if (allowRetry) scheduleRetry()
+            } finally { bitmap.recycle(); ocrInProgress = false }
+        }
     }
-
-    private fun normalizarTextoOcr(raw: String): String {
-        var value = raw
-            .replace('\u00A0', ' ')
-            .replace(Regex("(?i)A\\s*R\\s*S"), "ARS")
-            .replace(Regex("(?i)k\\s*m"), "km")
-            .replace(Regex("(?i)m\\s*[i1l]\\s*n"), "min")
-            .replace(Regex("[\\r\\n]+"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-
-        // OCR suele separar miles: "ARS 6 084" / "$ 6 084".
-        value = value.replace(
-            Regex("(?i)(ARS|\\$)\\s*([0-9]{1,3})\\s+([0-9]{3})(?![0-9])")
-        ) { match -> "${match.groupValues[1]}${match.groupValues[2]}${match.groupValues[3]}" }
-
-        return value
-    }
-
     private fun registrarCambioPrimerPlano(packageName: String) {
         if (packageName == estadoPrimerPlano) return
         estadoPrimerPlano = packageName
@@ -408,56 +664,74 @@ class TripAccessibilityService : AccessibilityService() {
         ofertaTexto: String,
         source: String
     ): Boolean {
-        val minKm = settingsCache.minRateByKm.toDoubleOrNull() ?: 950.0
-        val minHora = settingsCache.minRateByHour.toDoubleOrNull() ?: 0.0
-        val maxPickup = settingsCache.maxPickupDistance.toDoubleOrNull() ?: 0.0
+        if (SystemClock.elapsedRealtime() < suppressUntil) return false
+        val activeSettings = settingsCache
+        val minKm = activeSettings.minRateByKm.replace(',', '.').toDoubleOrNull() ?: 950.0
+        val minHora = activeSettings.minRateByHour.replace(',', '.').toDoubleOrNull() ?: 0.0
+        val maxPickup = activeSettings.maxPickupDistance.replace(',', '.').toDoubleOrNull() ?: 0.0
 
-        val tripEvaluator = TripEvaluator(
-            tarifaMinimaPorKm = minKm,
-            tarifaMinimaPorHora = minHora
-        )
+        val tripEvaluator = activeSettings.evaluator()
 
         val rutas = extraerRutas(ofertaTexto)
         val pickup = rutas.firstOrNull()?.first.orEmpty()
         val destino = rutas.lastOrNull()?.second.orEmpty()
-        val datos = tripEvaluator.extraerDatosDeViaje(ofertaTexto, destino, pickup)
+        val parsed = tripEvaluator.extraerDatosDeViaje(ofertaTexto, destino, pickup)
+        val datos = parsed.copy(
+            pickup = neighborhoods.cached(pickup)?.let { "$pickup, CABA - $it" } ?: pickup,
+            destino = neighborhoods.cached(destino)?.let { "$destino, CABA - $it" } ?: destino)
 
         Log.d(
             TAG,
             "${app.label}/$source PARSE: precio=${datos.precio} pickupKm=${datos.pickupDistanceKm} " +
-                "viajeKm=${datos.distanciaKm} viajeMin=${datos.duracionMin} pickup='$pickup' destino='$destino'"
+                "pickupMin=${datos.pickupDurationMin} viajeKm=${datos.distanciaKm} viajeMin=${datos.duracionMin} ${datos.priceDiagnostics}"
         )
 
-        if (datos.precio <= 0.0 || datos.distanciaKm <= 0.0 || datos.duracionMin <= 0.0) {
+        DiagnosticRecorder.event("parse", "readId" to readId, "source" to source,
+            "complete" to datos.completeReading, "fare" to datos.precio, "pickupKm" to datos.pickupDistanceKm,
+            "tripKm" to datos.distanciaKm, "pickupMin" to datos.pickupDurationMin, "tripMin" to datos.duracionMin)
+        if (!datos.completeReading) {
+            summary.incomplete()
             Log.d(TAG, "${app.label}/$source oferta candidata incompleta")
+            val now = SystemClock.elapsedRealtime()
+            if ((source == "OCR" || !usesOcrFallback(app)) && now - lastIncompleteAt > 15000L && now - lastCompleteAt > 9000L) {
+                lastIncompleteAt = now
+                mostrarResultado(ResultadoEvaluacion(false, MotivoEvaluacion.DISTANCIA_INVALIDA,
+                    Double.NaN, Double.NaN), datos, "INCOMPLETE", maxPickup, "partial-$now", activeSettings)
+            }
             return false
         }
 
-        val evaluacion = tripEvaluator.evaluarViaje(datos, settingsCache.excludedZones)
-        val nivel = clasificarRentabilidad(
-            evaluacion = evaluacion,
-            datos = datos,
-            minKm = minKm,
-            minHora = minHora,
-            maxPickup = maxPickup
-        )
+        val evaluacion = tripEvaluator.evaluarViaje(datos, activeSettings.excludedZones)
+        val nivel = classifyOffer(datos, evaluacion, activeSettings)
+        lastCompleteAt = SystemClock.elapsedRealtime()
 
         Log.d(
             TAG,
-            "${app.label}/$source EVAL: $%.0f | %.2f km | %.0f min | $%.0f/km | $%.0f/h | nivel=$nivel | motivo=${evaluacion.motivo}".format(
+            "${app.label}/$source EVAL: precio=$%.0f | totalKm=%.3f | totalMin=%.1f | $%.0f/km | $%.0f/h | nivel=$nivel | motivo=${evaluacion.motivo}".format(
                 datos.precio,
-                datos.distanciaKm,
-                datos.duracionMin,
+                datos.distanciaKm + datos.pickupDistanceKm,
+                datos.duracionMin + datos.pickupDurationMin,
                 evaluacion.tarifaPorKm,
                 evaluacion.tarifaPorHora
             )
         )
 
-        val fingerprint = buildFingerprint(packageName, datos, evaluacion)
-        val ahora = System.currentTimeMillis()
+        offerDismissal.reset()
+        watchOverlay()
+        val fingerprint = buildFingerprint(packageName, parsed)
+        DiagnosticRecorder.event("evaluation", "readId" to readId, "offerId" to fingerprint,
+            "rateKm" to evaluacion.tarifaPorKm, "rateHour" to evaluacion.tarifaPorHora,
+            "minKm" to minKm, "minHour" to minHora, "maxPickup" to maxPickup, "level" to nivel)
+        JourneyLocationService.offerDetected()
+        val ahora = SystemClock.elapsedRealtime()
         val anterior = ofertasProcesadas[fingerprint]
-        if (anterior != null && ahora - anterior < 4000L) {
-            Log.d(TAG, "Oferta duplicada ignorada (<4s)")
+        if (anterior != null && ahora - anterior < 30000L) {
+            ofertasProcesadas[fingerprint] = ahora
+            recordIds[fingerprint]?.let { completion.offered(com.example.lovale2.domain.CompletedTripTracker.Offer(it, packageName, datos.precio, ahora)) }
+            if (centralCards != null) mostrarResultado(evaluacion, datos, nivel, maxPickup, fingerprint, activeSettings)
+            resolveZones(datos, fingerprint, activeSettings)
+            DiagnosticRecorder.event("deduplicated", "offerId" to fingerprint)
+            Log.d(TAG, "Oferta duplicada ignorada (<30s desde última lectura)")
             return true
         }
 
@@ -466,9 +740,59 @@ class TripAccessibilityService : AccessibilityService() {
             ofertasProcesadas.remove(ofertasProcesadas.entries.first().key)
         }
 
-        mostrarResultado(evaluacion, datos, nivel, maxPickup)
+        summary.offer()
+        val recordId = java.util.UUID.randomUUID().toString()
+        recordIds[fingerprint] = recordId
+        while (recordIds.size > 100) recordIds.remove(recordIds.keys.first())
+        DiagnosticRecorder.event("history_offer", "recordId" to recordId, "offerId" to fingerprint)
+        completion.offered(com.example.lovale2.domain.CompletedTripTracker.Offer(recordId, packageName, datos.precio, ahora))
+        serviceScope.launch {
+            try {
+                OfferHistory(this@TripAccessibilityService).add(OfferRecord(System.currentTimeMillis(), app.label,
+                    datos.precio, evaluacion.tarifaPorKm, evaluacion.tarifaPorHora,
+                    nivel,
+                    if (maxPickup > 0 && datos.pickupDistanceKm > maxPickup) "PICKUP_EXCEDIDO" else evaluacion.motivo.name,
+                    false, id = recordId, totalKm = datos.distanciaKm + datos.pickupDistanceKm,
+                    totalMinutes = datos.duracionMin + datos.pickupDurationMin,
+                    costs = tripEvaluator.estimarCostos(datos, activeSettings.vehicleCosts),
+                    vehicleSnapshot = activeSettings.vehicleCosts.takeIf { it.ready }))
+            } catch (e: Exception) { Log.e(TAG, "HISTORY no se pudo guardar oferta", e) }
+        }
+        mostrarResultado(evaluacion, datos, nivel, maxPickup, fingerprint, activeSettings)
+        resolveZones(datos, fingerprint, activeSettings)
         return true
     }
+
+    private fun resolveZones(datos: DatosViaje, offerId: String, settings: AppSettings) {
+        if (hasExplicitZone(datos.pickup) && hasExplicitZone(datos.destino)) return
+        if (zoneJobs.size >= 8 || !zoneJobs.add(offerId)) return
+        val token = generation
+        val window = currentTargetWindow()
+        serviceScope.launch {
+            try {
+                val stillRelevant = { generation == token && settingsCache == settings && settingsCache.serviceActive }
+                val pickup = if (hasExplicitZone(datos.pickup)) null else neighborhoods.resolve(datos.pickup, stillRelevant)
+                val destination = if (hasExplicitZone(datos.destino)) null else neighborhoods.resolve(datos.destino, stillRelevant)
+                if (pickup == null && destination == null) return@launch
+                // Never revive a rejected offer, update another platform or attach stale screen results.
+                if (generation != token || settingsCache != settings || !settingsCache.serviceActive || currentTargetWindow() != window) return@launch
+                val enriched = datos.copy(
+                    pickup = pickup?.let { "${datos.pickup}, CABA - $it" } ?: datos.pickup,
+                    destino = destination?.let { "${datos.destino}, CABA - $it" } ?: datos.destino)
+                val result = settings.evaluator().evaluarViaje(enriched, settings.excludedZones)
+                val known = hasExplicitZone(enriched.pickup) && hasExplicitZone(enriched.destino)
+                val level = classifyOffer(enriched, result, settings)
+                TripOverlayService.updateZone(offerId, known, result.zonaDetectada.orEmpty(), level)
+                recordIds[offerId]?.let { OfferHistory(this@TripAccessibilityService).updateEvaluation(it, level, result.motivo.name) }
+                Log.d(TAG, "ZONE/USIG resolved pickup=${pickup != null} destination=${destination != null} known=$known")
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { Log.w(TAG, "ZONE/USIG unavailable: ${e.javaClass.simpleName}") }
+            finally { zoneJobs.remove(offerId) }
+        }
+    }
+
+    private var lastIncompleteAt = -15000L
+    private var lastCompleteAt = -9000L
 
     private fun clasificarRentabilidad(
         evaluacion: ResultadoEvaluacion,
@@ -509,8 +833,7 @@ class TripAccessibilityService : AccessibilityService() {
         val tienePrecio = Regex("""(?:\$|ARS)\s*[0-9]""", RegexOption.IGNORE_CASE)
             .containsMatchIn(texto)
         return if (app == RideApp.UBER) {
-            tienePrecio && texto.contains("min", ignoreCase = true) &&
-                (texto.contains("km", ignoreCase = true) || Regex("""\b\d+\s*m\b""").containsMatchIn(texto))
+            OfferText.isUberCandidate(texto)
         } else {
             tienePrecio && contarParesMinKm(texto) >= 2
         }
@@ -542,7 +865,7 @@ class TripAccessibilityService : AccessibilityService() {
 
         if (resultado.size >= 2) return listOf(resultado.first() to resultado.last())
         if (resultado.size == 1 && resultado.first().isNotBlank()) {
-            return listOf(resultado.first() to resultado.first())
+            return listOf(resultado.first() to "")
         }
 
         val direcciones = texto
@@ -553,7 +876,7 @@ class TripAccessibilityService : AccessibilityService() {
         return if (direcciones.size >= 2) {
             listOf(direcciones.first() to direcciones.last())
         } else if (direcciones.size == 1) {
-            listOf(direcciones.first() to direcciones.first())
+            listOf(direcciones.first() to "")
         } else {
             emptyList()
         }
@@ -561,9 +884,12 @@ class TripAccessibilityService : AccessibilityService() {
 
     private fun limpiarDireccion(value: String): String = value
         .replace(Regex("^[\\s:·•\\-–—()]+"), "")
-        .replace(Regex("(?i)^(a|viaje|destino|recogida|pickup)\\s*:?\\s*"), "")
+        .replace(Regex("(?i)^(a|viaje|destino|recogida|pickup)\\b\\s*:?\\s*"), "")
         .replace(Regex("\\s+"), " ")
         .trim(' ', '.', ':', '·', '•', '-', '–', '—')
+
+    private fun hasExplicitZone(address: String): Boolean =
+        Regex("(?i)(?:CABA|Buenos Aires|Vicente L[oó]pez)\\s*-\\s*[A-Za-zÁÉÍÓÚáéíóúÑñ]").containsMatchIn(address)
 
     private fun looksLikeAddress(value: String): Boolean {
         val text = value.trim()
@@ -580,15 +906,27 @@ class TripAccessibilityService : AccessibilityService() {
             )
     }
 
-    private fun recolectarTextos(node: AccessibilityNodeInfo, destino: MutableList<String>) {
+    private class TreeBudget(val deadline: Long, val enabled: Boolean,
+                             var nodes: Int = 0, var limited: Boolean = false)
+
+    private fun recolectarTextos(node: AccessibilityNodeInfo, destino: MutableList<String>, budget: TreeBudget, depth: Int = 0) {
+        if (budget.enabled && (budget.nodes >= 180 || depth >= 30 || SystemClock.elapsedRealtime() >= budget.deadline)) {
+            budget.limited = true
+            return
+        }
+        budget.nodes++
         node.text?.toString()?.let { if (it.isNotBlank()) destino.add(it) }
         node.contentDescription?.toString()?.let { if (it.isNotBlank()) destino.add(it) }
 
         for (i in 0 until node.childCount) {
+            if (budget.enabled && (SystemClock.elapsedRealtime() >= budget.deadline || budget.nodes >= 180)) {
+                budget.limited = true
+                break
+            }
             val child = try { node.getChild(i) } catch (_: Throwable) { null }
             child?.let { c ->
                 try {
-                    recolectarTextos(c, destino)
+                    recolectarTextos(c, destino, budget, depth + 1)
                 } finally {
                     @Suppress("DEPRECATION")
                     try { c.recycle() } catch (_: Throwable) {}
@@ -599,20 +937,29 @@ class TripAccessibilityService : AccessibilityService() {
 
     private fun buildFingerprint(
         packageName: String,
-        datos: DatosViaje,
-        evaluacion: ResultadoEvaluacion
-    ): String = "$packageName|${datos.precio}|${datos.distanciaKm}|${datos.duracionMin}|${datos.pickup}|${datos.destino}|${evaluacion.motivo}"
+        datos: DatosViaje
+    ): String {
+        // Distinguish simultaneous equal-price routes without putting addresses in diagnostic IDs.
+        val route = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${datos.pickup}|${datos.destino}".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return "$packageName|${datos.precio}|${datos.distanciaKm}|${datos.duracionMin}|${datos.pickupDistanceKm}|${datos.pickupDurationMin}|$route"
+    }
 
     private fun mostrarResultado(
         evaluacion: ResultadoEvaluacion,
         datos: DatosViaje,
         nivel: String,
-        maxPickup: Double
+        maxPickup: Double,
+        offerId: String,
+        activeSettings: AppSettings
     ) {
+        DiagnosticRecorder.event("overlay_request", "offerId" to offerId, "level" to nivel)
         val zoneLabel = evaluacion.zonaDetectada.orEmpty()
         val pickupFuera = maxPickup > 0.0 && datos.pickupDistanceKm > 0.0 && datos.pickupDistanceKm > maxPickup
 
         val (titulo, mensaje) = when (nivel) {
+            "INCOMPLETE" -> "Lectura incompleta" to "No se pudo leer precio, recogida y viaje completos"
             "GREEN" -> "Viaje rentable" to "Cumple tus parámetros"
             "YELLOW" -> "Viaje casi rentable" to "Está entre 85% y 100% de tus mínimos"
             "ZONE" -> "Zona no deseada" to if (zoneLabel.isNotBlank()) zoneLabel else "Zona excluida"
@@ -623,25 +970,46 @@ class TripAccessibilityService : AccessibilityService() {
             }
         }
 
-        crearCanalYMostrarNotificacion(titulo, mensaje)
-
         val overlayIntent = Intent(this, TripOverlayService::class.java).apply {
+            activeSettings.evaluator().estimarCostos(datos, activeSettings.vehicleCosts)?.let {
+                putExtra("EXTRA_ESTIMATED_NET", it.net)
+            }
+            putExtra("EXTRA_OFFER_ID", offerId)
+            putExtra("EXTRA_FARE", datos.precio)
+            putExtra("EXTRA_PLATFORM_PACKAGE", activeSettings.selectedApp?.packageName)
+            putExtra("EXTRA_RATE_KM", evaluacion.tarifaPorKm)
+            putExtra("EXTRA_RATE_HOUR", evaluacion.tarifaPorHora)
+            putExtra("EXTRA_MIN_KM", activeSettings.minRateByKm.replace(',', '.').toDoubleOrNull() ?: 950.0)
+            putExtra("EXTRA_MIN_HOUR", activeSettings.minRateByHour.replace(',', '.').toDoubleOrNull() ?: 0.0)
+            putExtra("EXTRA_PICKUP_EXCEEDED", pickupFuera)
+            putExtra("EXTRA_ZONE_KNOWN", hasExplicitZone(datos.pickup) && hasExplicitZone(datos.destino))
             putExtra("EXTRA_PROFITABILITY_LEVEL", nivel)
             putExtra("EXTRA_ZONE_LABEL", zoneLabel)
         }
 
+        if (centralCards != null) {
+            val window = currentTargetWindow()
+            val statusTop = if (Build.VERSION.SDK_INT >= 30) getSystemService(android.view.WindowManager::class.java)
+                .currentWindowMetrics.windowInsets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.statusBars()).top else 0
+            overlayIntent.putExtra("EXTRA_CARD_TOP", (cardAnchor?.top ?: 0) + (window?.bounds?.top ?: 0) - statusTop)
+            overlayIntent.putExtra("EXTRA_CARD_RIGHT", window?.bounds?.right ?: resources.displayMetrics.widthPixels)
+            centralCards?.add(overlayIntent)
+            return
+        }
         try {
             if (!Settings.canDrawOverlays(this)) {
                 Log.w(TAG, "Oferta detectada pero SYSTEM_ALERT_WINDOW no está concedido; se mantiene la notificación")
+                crearCanalYMostrarNotificacion(titulo, mensaje)
                 return
             }
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(ALERT_NOTIFICATION_ID)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ContextCompat.startForegroundService(this, overlayIntent)
             } else {
                 startService(overlayIntent)
             }
-            Log.d(TAG, "OVERLAY solicitado: nivel=$nivel zona='$zoneLabel'")
+            Log.d(TAG, "OVERLAY solicitado: nivel=$nivel")
         } catch (t: Throwable) {
             Log.e(TAG, "No se pudo iniciar TripOverlayService", t)
         }
@@ -662,7 +1030,7 @@ class TripAccessibilityService : AccessibilityService() {
         notificationManager.notify(
             ALERT_NOTIFICATION_ID,
             NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(com.example.lovale2.R.drawable.ic_lovale_notification)
                 .setContentTitle(titulo)
                 .setContentText(descripcion)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -672,10 +1040,19 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        MonitoringHealth.connected(false)
         Log.d(TAG, "Servicio de accesibilidad interrumpido temporalmente")
     }
 
     override fun onDestroy() {
+        DiagnosticRecorder.stop("servicio interrumpido")
+        MonitoringHealth.connected(false)
+        destroyed = true
+        generation++
+        handler.removeCallbacksAndMessages(null)
+        @Suppress("DEPRECATION")
+        pendingEvent?.recycle()
+        pendingEvent = null
         serviceScope.cancel()
         try { textRecognizer.close() } catch (_: Throwable) {}
         super.onDestroy()

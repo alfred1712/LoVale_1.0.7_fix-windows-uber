@@ -13,16 +13,20 @@ android {
         applicationId = "com.example.lovale2"
         minSdk = 24
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.0.8-beta2"
+        versionCode = 40
+        versionName = "1.0.8-beta35"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         release {
+            // Optional local verification only; production signing remains external.
+            if (providers.gradleProperty("localReleaseTest").orNull == "true") {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             optimization {
-                enable = false
+                enable = true
             }
         }
     }
@@ -31,11 +35,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 }
 
 dependencies {
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
+    implementation("org.jsoup:jsoup:1.18.3")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
@@ -54,7 +61,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-    implementation("com.squareup.retrofit2:retrofit:2.9.0")
-    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    implementation("com.google.code.gson:gson:2.13.2")
     implementation("com.google.mlkit:text-recognition:16.0.1")
 }
