@@ -22,3 +22,9 @@ Autorización explícita del usuario para enviar direcciones de ofertas a USIG. 
 No garantiza resolver toda dirección OCR. Sin Internet, fuera de CABA, sin altura o con respuesta ambigua sigue Zona sin verificar. Un solo extremo excluido basta para advertir; para indicar zona deseada ambos extremos deben estar identificados. La caché se pierde al terminar el proceso. Falta observar esta consulta durante una nueva oferta real en calle; la validación de red y overlay se realizó mediante pruebas controladas.
 
 Sin merge a master. Se mantiene la limitación de fuente de combustible descrita en VALIDACION_BETA34.md.
+
+## Cierre de pruebas — 20/09/2026
+
+Beta35 instalada. De la suite de 22 casos, 13 pasaron inicialmente y nueve de interfaz requirieron repetir con el teléfono desbloqueado. En la repetición pasaron siete; se corrigieron dos selectores antiguos de NavigationTest que buscaban texto visible en lugar de la descripción accesible de las pestañas compactas. Ambos casos volvieron a ejecutarse y pasaron. Resultado acumulado: 22 casos aprobados, sin pruebas omitidas por falta de capturas en este dispositivo.
+
+Se repitieron clean, assembleDebug, testDebugUnitTest y assembleDebugAndroidTest: BUILD SUCCESSFUL y 96 tests unitarios aprobados. Esta última corrección afecta únicamente a tests, sin cambios en el APK de producción ni incremento de versión. LoVale quedó abierta al finalizar. No sustituye la validación de llegada a casa y recibos de fin de viaje en una jornada real.

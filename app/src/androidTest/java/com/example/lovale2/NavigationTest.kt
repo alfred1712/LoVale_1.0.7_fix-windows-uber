@@ -33,7 +33,7 @@ class NavigationTest {
     }
 
     @Test fun diagnosticControlsAreReachableAndVisualRecordingIsOptIn() {
-        compose.onNodeWithText("Ganancias").performClick()
+        compose.onNodeWithContentDescription("Ganancias").performClick()
         compose.onNodeWithText("Preparar registro").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithText("Registrar una prueba").assertIsDisplayed()
         if (Build.VERSION.SDK_INT >= 34) compose.onNode(isToggleable()).assertIsOff()
@@ -50,21 +50,21 @@ class NavigationTest {
         val insets = ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
             ?.getInsets(WindowInsetsCompat.Type.systemBars())
         val title = compose.onNodeWithText("Panel de control").getUnclippedBoundsInRoot()
-        val bottom = compose.onNodeWithText("Inicio").getUnclippedBoundsInRoot()
+        val bottom = compose.onNodeWithContentDescription("Inicio").getUnclippedBoundsInRoot()
         assertTrue(title.top.value * density >= (insets?.top ?: 0))
         assertTrue(bottom.bottom.value * density <= compose.activity.window.decorView.height - (insets?.bottom ?: 0))
         capture("inicio")
-        compose.onNodeWithText("Combustible").performClick()
+        compose.onNodeWithContentDescription("Combustible").performClick()
         compose.onNodeWithText("Mi vehículo").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Ganancias de hoy").assertDoesNotExist()
         capture("combustible")
-        compose.onNodeWithText("Ganancias").performClick()
+        compose.onNodeWithContentDescription("Ganancias").performClick()
         compose.onNodeWithText("Ganancias de hoy").assertIsDisplayed()
         compose.onNodeWithText("Km de jornada · GPS").assertIsDisplayed()
         compose.onNodeWithText("Historial de ofertas").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Mi vehículo").assertDoesNotExist()
         capture("ganancias")
-        compose.onNodeWithText("Inicio").performClick()
+        compose.onNodeWithContentDescription("Inicio").performClick()
         compose.onNodeWithText("Panel de control").assertIsDisplayed()
     }
 
