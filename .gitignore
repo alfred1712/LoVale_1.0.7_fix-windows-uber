@@ -13,3 +13,12 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+/diagnostics/
+/.codex-remote-attachments/
+/release-artifacts/
+/app/src/androidTest/assets/
+/*-device.log
+/*-source.csv
+/*-source.json
+/*-source.html

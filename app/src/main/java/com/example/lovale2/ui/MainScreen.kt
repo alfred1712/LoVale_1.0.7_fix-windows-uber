@@ -1,13 +1,11 @@
 package com.example.lovale2.ui
 
-import android.app.Activity
 import android.content.Intent
 import android.provider.Settings
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,14 +18,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.lovale2.data.settings.RideApp
-import com.example.lovale2.services.ScreenCaptureHolder
 
 @Composable
 fun MainScreen(
@@ -39,43 +35,44 @@ fun MainScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val settings by viewModel.settings.collectAsState()
+    val health by com.example.lovale2.services.MonitoringHealth.state.collectAsState()
+    val diagnostic by com.example.lovale2.diagnostics.DiagnosticRecorder.state.collectAsState()
     val selectedApp = settings.selectedApp
+    val journey by viewModel.journey.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val locationPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { viewModel.toggleService(true) }
+    fun activate() {
+        if (journey.homeLatitude != null && androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.ACCESS_FINE_LOCATION
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            locationPermission.launch(arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                android.Manifest.permission.ACCESS_FINE_LOCATION))
+        } else viewModel.toggleService(true)
+    }
 
     var showFilterDialog by remember { mutableStateOf<String?>(null) }
     var tempFilterInput by remember { mutableStateOf("") }
 
-    val primaryCyan = Color(0xFF00E5FF)
-    val backgroundDark = Color(0xFF070D15)
-    val cardBackground = Color(0xFF0E1726)
-    val borderColor = Color(0xFF1E2D4A)
-
-    val context = LocalContext.current
-
-    val mediaProjectionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            // Guardamos el permiso concedido
-            ScreenCaptureHolder.resultCode = result.resultCode
-            ScreenCaptureHolder.resultData = result.data
-            ScreenCaptureHolder.isCapturing = true
-
-            Toast.makeText(context, "¡Captura OCR activada!", Toast.LENGTH_SHORT).show()
-
-            // Encendemos automáticamente el servicio principal
-            viewModel.toggleService(true)
-        } else {
-            Toast.makeText(context, "Permiso de captura denegado", Toast.LENGTH_SHORT).show()
-            viewModel.toggleService(false)
-        }
-    }
+    val primaryAccent = MaterialTheme.colorScheme.primary
+    val backgroundDark = MaterialTheme.colorScheme.background
+    val cardBackground = MaterialTheme.colorScheme.surfaceContainer
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
 
     Column(
-        modifier = Modifier.fillMaxSize().background(backgroundDark).padding(16.dp),
+        modifier = Modifier.fillMaxSize().background(backgroundDark).verticalScroll(rememberScrollState()).padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "Panel de control", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
-        Text(text = "Configura tus filtros y monitorea tus viajes", color = Color(0xFF8A99AD), fontSize = 12.sp, modifier = Modifier.fillMaxWidth())
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(com.example.lovale2.R.drawable.lovale_mark),
+                contentDescription = "LoVale", modifier = Modifier.size(56.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(text = "Panel de control", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp,
+                fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        }
+
 
         Spacer(modifier = Modifier.height(10.dp))
 
@@ -86,12 +83,8 @@ fun MainScreen(
             border = BorderStroke(1.dp, borderColor)
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                Text("Aplicación a monitorear", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    if (selectedApp == null) "Elegí una plataforma antes de activar LoVale." else "LoVale solo procesará ${selectedApp.label} cuando esté en primer plano.",
-                    color = Color(0xFF8A99AD), fontSize = 11.sp
-                )
+                Text("Tu app", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RideApp.entries.forEach { app ->
@@ -101,7 +94,7 @@ fun MainScreen(
                                 if (settings.serviceActive) viewModel.toggleService(false)
                                 viewModel.setSelectedApp(app)
                             },
-                            label = { Text(app.label, fontSize = 12.sp) },
+                            label = { RideAppIcon(app) },
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -113,16 +106,13 @@ fun MainScreen(
         if (!isAccessibilityServiceEnabled) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF3A1414)),
-                border = BorderStroke(1.dp, Color(0xFFFF5252).copy(alpha = 0.5f))
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("El servicio de accesibilidad no está activado", color = Color(0xFFFF8A80), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Text("Sin esto, la app no puede leer las pantallas de Uber/Cabify/DiDi.", color = Color(0xFF8A99AD), fontSize = 11.sp)
+                    Text("Falta permiso de lectura", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = onOpenAccessibilitySettings) {
-                        Text("Habilitar ahora")
-                    }
+                    Button(onClick = onOpenAccessibilitySettings) { IconLabel(Icons.Default.Accessibility, "Habilitar lectura") }
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
@@ -131,62 +121,52 @@ fun MainScreen(
         if (!overlayPermissionGranted) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A14)),
-                border = BorderStroke(1.dp, Color(0xFFFFB74D).copy(alpha = 0.6f))
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("Falta permiso para la ventana flotante", color = Color(0xFFFFCC80), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Text("LoVale puede detectar viajes, pero no podrá mostrar el resultado encima de Uber/Cabify/DiDi hasta habilitarlo.", color = Color(0xFFB0BEC5), fontSize = 11.sp)
+                    Text("Falta permiso de alertas", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = onOpenOverlaySettings) { Text("Habilitar ventana flotante") }
+                    Button(onClick = onOpenOverlaySettings) { IconLabel(Icons.Default.Notifications, "Habilitar alertas") }
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
         }
 
-        // Botón para activar la captura OCR en pantalla ubicado justo encima del servicio principal
-        Button(
-            onClick = {
-                val mediaProjectionManager = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-                mediaProjectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = primaryCyan)
-        ) {
-            Text("Activar Captura OCR (Uber/DiDi)", color = Color.Black, fontWeight = FontWeight.Bold)
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = if (settings.serviceActive) Color(0xFF0A2E1F) else cardBackground),
-            border = BorderStroke(1.dp, if (settings.serviceActive) Color(0xFF00E676).copy(alpha = 0.5f) else borderColor)
+            colors = CardDefaults.cardColors(containerColor = if (settings.serviceActive) MaterialTheme.colorScheme.primaryContainer else cardBackground),
+            border = BorderStroke(1.dp, if (settings.serviceActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else borderColor)
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = when {
-                        settings.serviceActive -> "Estado: Activo — ${selectedApp?.label ?: "Sin plataforma"}"
-                        selectedApp == null -> "Estado: Seleccioná una plataforma"
-                        else -> "Estado: Pausado — ${selectedApp.label}"
+                        settings.serviceActive -> "Activo · ${selectedApp?.label ?: "Sin plataforma"}"
+                        selectedApp == null -> "Elegí tu app"
+                        else -> "Pausado · ${selectedApp.label}"
                     },
-                    color = if (settings.serviceActive) Color(0xFF00E676) else primaryCyan,
-                    fontSize = 12.sp, fontWeight = FontWeight.Bold
+                    color = if (settings.serviceActive) MaterialTheme.colorScheme.onPrimaryContainer else primaryAccent,
+                    fontSize = 14.sp, fontWeight = FontWeight.Bold
                 )
+                if (settings.serviceActive) {
+                    Text(health.label, color = if (health.warning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    Text(if (journey.running) "Km automáticos" else journey.message,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                }
                 Spacer(modifier = Modifier.height(14.dp))
                 Box(
                     modifier = Modifier.size(70.dp).clip(CircleShape)
-                        .background(if (settings.serviceActive) Color(0xFF00E676) else primaryCyan),
+                        .background(primaryAccent),
                     contentAlignment = Alignment.Center
                 ) {
                     IconButton(
                         enabled = settings.serviceActive || selectedApp != null,
-                        onClick = { viewModel.toggleService(!settings.serviceActive) }
+                        onClick = { if (settings.serviceActive) viewModel.toggleService(false) else activate() }
                     ) {
                         Icon(
                             imageVector = if (settings.serviceActive) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = "Iniciar", tint = Color.Black, modifier = Modifier.size(35.dp)
+                            contentDescription = if (settings.serviceActive) "Pausar" else "Iniciar", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(35.dp)
                         )
                     }
                 }
@@ -202,29 +182,33 @@ fun MainScreen(
             border = BorderStroke(1.dp, borderColor)
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                Text("Filtros inteligentes", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text("Tus mínimos", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(10.dp))
 
-                FilterRow(title = "Por hora", value = "$ ${settings.minRateByHour}", isActive = true) {
+                FilterRow(icon = Icons.Default.Schedule, title = "Por hora", value = "$ ${settings.minRateByHour}", isActive = true) {
                     tempFilterInput = settings.minRateByHour
                     showFilterDialog = "hour"
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                FilterRow(title = "Por km", value = "$ ${settings.minRateByKm}", isActive = true) {
+                FilterRow(icon = Icons.Default.Route, title = "Por km", value = "$ ${settings.minRateByKm}", isActive = true) {
                     tempFilterInput = settings.minRateByKm
                     showFilterDialog = "km"
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                FilterRow(title = "Pickup máx.", value = "${settings.maxPickupDistance} km", isActive = true) {
+                FilterRow(icon = Icons.Default.PersonPinCircle, title = "Recogida máx.", value = "${settings.maxPickupDistance} km", isActive = true) {
                     tempFilterInput = settings.maxPickupDistance
                     showFilterDialog = "pickup"
                 }
                 Spacer(modifier = Modifier.height(6.dp))
 
-                val summaryZones = if (settings.excludedZones.isEmpty()) "Sin zonas bloqueadas" else "${settings.excludedZones.size} zonas excluidas"
-                FilterRow(title = "Zonas no deseadas", value = summaryZones, isActive = settings.excludedZones.isNotEmpty(), onClick = onManageZones)
+                val summaryZones = if (settings.excludedZones.isEmpty()) "Ninguna" else "${settings.excludedZones.size} bloqueadas"
+                FilterRow(icon = Icons.Default.LocationOff, title = "Zonas", value = summaryZones, isActive = settings.excludedZones.isNotEmpty(), onClick = onManageZones)
             }
         }
+        if (diagnostic.active) Text("Diagnóstico ${if (diagnostic.visual) "con imágenes" else "técnico"} activo",
+            color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+        ReadingReportPanel()
+        DriverTools(viewModel, showHistory = false)
     }
 
     if (showFilterDialog != null) {
@@ -239,13 +223,13 @@ fun MainScreen(
             text = {
                 OutlinedTextField(
                     value = tempFilterInput,
-                    onValueChange = { tempFilterInput = it.filter { c -> c.isDigit() } },
+                    onValueChange = { tempFilterInput = it.filter { c -> c.isDigit() || c == '.' || c == ',' } },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
             },
             confirmButton = {
-                Button(onClick = {
+                Button(enabled = tempFilterInput.replace(',', '.').toDoubleOrNull()?.let { it.isFinite() && it >= 0 } == true, onClick = {
                     when (showFilterDialog) {
                         "hour" -> viewModel.setMinRateByHour(tempFilterInput)
                         "km" -> viewModel.setMinRateByKm(tempFilterInput)
@@ -260,28 +244,21 @@ fun MainScreen(
 }
 
 @Composable
-fun FilterRow(title: String, value: String, isActive: Boolean, onClick: () -> Unit) {
-    val primaryCyan = Color(0xFF00E5FF)
-    Surface(onClick = onClick, shape = RoundedCornerShape(10.dp), color = Color(0xFF07111D), border = BorderStroke(1.dp, Color(0xFF1E2D4A))) {
+fun FilterRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, value: String, isActive: Boolean, onClick: () -> Unit) {
+    val primaryAccent = MaterialTheme.colorScheme.primary
+    Surface(onClick = onClick, shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Icon(icon, contentDescription = null, tint = primaryAccent, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, color = Color(0xFF8A99AD), fontSize = 11.sp)
-                Text(text = value, color = if (isActive) primaryCyan else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(text = title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                Text(text = value, color = if (isActive) primaryAccent else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
-            Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+            Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
         }
-    }
-}
-
-fun verificarYPedirPermisoNotificaciones(context: android.content.Context) {
-    val listenerContenido = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-    val packageName = context.packageName
-    if (listenerContenido == null || !listenerContenido.contains(packageName)) {
-        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-        context.startActivity(intent)
     }
 }

@@ -9,7 +9,10 @@ data class DatosViaje(
     val duracionMin: Double,
     val destino: String,
     val pickup: String = "",
-    val pickupDistanceKm: Double = 0.0
+    val pickupDistanceKm: Double = 0.0,
+    val pickupDurationMin: Double = 0.0,
+    val completeReading: Boolean = true,
+    val priceDiagnostics: String = ""
 )
 
 enum class MotivoEvaluacion {
@@ -30,6 +33,7 @@ class TripEvaluator(
     private val tarifaMinimaPorKm: Double,
     private val tarifaMinimaPorHora: Double
 ) {
+    fun estimarCostos(datos: DatosViaje, config: VehicleCosts): CostEstimate? = estimateCosts(datos, config)
     /**
      * Lee una única tarjeta/oferta. El servicio de accesibilidad se encarga de
      * separar las tarjetas cuando una pantalla contiene varias (por ejemplo,
@@ -41,12 +45,22 @@ class TripEvaluator(
      * - Cabify: "$3.686 ... 8 min · 1.9 km ... 13 min · 3 km"
      */
     fun extraerDatosDeViaje(texto: String, destino: String = "", pickup: String = ""): DatosViaje {
-        val normalized = texto.replace('\u00A0', ' ')
+        if (texto.length > 24000) return DatosViaje(0.0, 0.0, 0.0, destino, pickup,
+            completeReading = false, priceDiagnostics = "input_too_long")
+        val normalized = OfferText.normalize(texto)
 
         val priceMatches = Regex("""(?:\$|ARS)\s*([0-9][0-9.,]*)""", RegexOption.IGNORE_CASE)
             .findAll(normalized).toList()
-        val price = priceMatches
-            .sortedByDescending { scorePriceContext(normalized, it.range.first, it.range.last) }
+        // Rates displayed by the platform are derived values, never the fare.
+        val unitRateSuffix = Regex("""^\s*(?:[/⁄∕]|por\s+)\s*(?:km|h|hora|min)\b""", RegexOption.IGNORE_CASE)
+        val unitRates = priceMatches.filter { unitRateSuffix.containsMatchIn(normalized.substring(it.range.last + 1)) }
+        val fareCandidates = priceMatches
+            // Los adicionales del mapa (+ARS 410) no son el importe de la tarjeta.
+            .filterNot { normalized.substring(0, it.range.first).trimEnd().endsWith("+") }
+            .filterNot { it in unitRates }
+            .filterNot { isPromotionalAmount(normalized, it, priceMatches) }
+        // A card is now ordered top-to-bottom: headline fare precedes bonus components.
+        val price = fareCandidates
             .firstOrNull()
             ?.groupValues?.get(1)
             ?.let(::parseMoney) ?: 0.0
@@ -54,15 +68,20 @@ class TripEvaluator(
         // Buscamos los pares min/km en el orden visual de la tarjeta. La última
         // pareja representa el recorrido del pasajero; la primera, la recogida.
         val pairRegex = Regex(
-            """([0-9]+(?:[.,][0-9]+)?)\s*min(?:[^0-9k]{0,18})([0-9]+(?:[.,][0-9]+)?)\s*(km|m)|([0-9]+(?:[.,][0-9]+)?)\s*(km|m)(?:[^0-9m]{0,18})([0-9]+(?:[.,][0-9]+)?)\s*min""",
+            """(?<![\d.,])([0-9]+(?:[.,][0-9]+)?)\s*min(?:[\s()·•,:;\-]{0,18})([0-9]+(?:[.,][0-9]+)?)\s*(km|m)\b|(?<![\d.,])([0-9]+(?:[.,][0-9]+)?)\s*(km|m)(?:[\s()·•,:;\-]{0,18})([0-9]+(?:[.,][0-9]+)?)\s*min\b""",
             RegexOption.IGNORE_CASE
         )
+        var ambiguousUnit = false
         val pairs = pairRegex.findAll(normalized).mapNotNull { match ->
             val min = (match.groupValues[1].ifBlank { match.groupValues[6] }).let(::parseDecimal)
             val rawDistance = (match.groupValues[2].ifBlank { match.groupValues[4] }).let(::parseDecimal)
             val unit = (match.groupValues[3].ifBlank { match.groupValues[5] }).lowercase(Locale.ROOT)
+            // Fractional meters in a driving offer can be an OCR-dropped k (8.9 km -> 8.9 m).
+            // Do not silently multiply: reject this reading and let Accessibility/OCR retry.
+            val distanceToken = match.groupValues[2].ifBlank { match.groupValues[4] }
+            if (unit == "m" && (distanceToken.contains('.') || distanceToken.contains(','))) ambiguousUnit = true
             val km = if (unit == "m") rawDistance / 1000.0 else rawDistance
-            if (min > 0.0 && km > 0.0) min to km else null
+            if (min.isFinite() && km.isFinite() && min > 0.0 && km > 0.0) min to km else null
         }.toList()
 
         val pickupPair = pairs.firstOrNull()
@@ -74,19 +93,31 @@ class TripEvaluator(
             duracionMin = tripPair?.first ?: 0.0,
             destino = destino,
             pickup = pickup,
-            pickupDistanceKm = if (pairs.size >= 2) pickupPair?.second ?: 0.0 else 0.0
+            pickupDistanceKm = if (pairs.size >= 2) pickupPair?.second ?: 0.0 else 0.0,
+            pickupDurationMin = if (pairs.size >= 2) pickupPair?.first ?: 0.0 else 0.0,
+            completeReading = price.isFinite() && price > 0.0 && pairs.size == 2 && !ambiguousUnit &&
+                pairs.all { (minutes, km) -> km / minutes * 60 <= 160 },
+            priceDiagnostics = "amounts=${priceMatches.size} unitRates=${unitRates.size} excluded=${priceMatches.size - fareCandidates.size} candidates=${fareCandidates.size} ambiguousUnit=$ambiguousUnit routePairs=${pairs.size} routes=${pairs.joinToString { "${it.first}min/${it.second}km" }}"
         )
     }
 
     fun evaluarViaje(datos: DatosViaje, zonasExcluidas: List<String>): ResultadoEvaluacion {
-        if (datos.distanciaKm <= 0.0) {
+        if (!datos.precio.isFinite() || datos.precio <= 0.0 || !datos.distanciaKm.isFinite() ||
+            !datos.duracionMin.isFinite() || !datos.pickupDistanceKm.isFinite() || !datos.pickupDurationMin.isFinite() ||
+            datos.distanciaKm <= 0.0 || datos.pickupDistanceKm < 0.0 || datos.duracionMin < 0.0 || datos.pickupDurationMin < 0.0) {
             return ResultadoEvaluacion(false, MotivoEvaluacion.DISTANCIA_INVALIDA, 0.0, 0.0)
         }
 
-        val tarifaPorKm = datos.precio / datos.distanciaKm
-        val tarifaPorHora = if (datos.duracionMin > 0) {
-            (datos.precio / datos.duracionMin) * 60.0
+        val distanciaTotal = datos.distanciaKm + datos.pickupDistanceKm.coerceAtLeast(0.0)
+        val duracionTotal = datos.duracionMin + datos.pickupDurationMin.coerceAtLeast(0.0)
+        val income = datos.precio
+        val tarifaPorKm = income / distanciaTotal
+        val tarifaPorHora = if (duracionTotal > 0) {
+            (income / duracionTotal) * 60.0
         } else 0.0
+        if (!distanciaTotal.isFinite() || !duracionTotal.isFinite() || !tarifaPorKm.isFinite() || !tarifaPorHora.isFinite()) {
+            return ResultadoEvaluacion(false, MotivoEvaluacion.DISTANCIA_INVALIDA, 0.0, 0.0)
+        }
 
         val zonaPickup = findExcludedZone(datos.pickup, zonasExcluidas)
         val zonaDestino = findExcludedZone(datos.destino, zonasExcluidas)
@@ -109,9 +140,12 @@ class TripEvaluator(
 
     private fun findExcludedZone(address: String, excludedZones: List<String>): String? {
         if (address.isBlank()) return null
-        val normalizedAddress = normalize(address)
+        val explicit = explicitNeighborhood(address)
+        // A CABA street named after a barrio is not proof that the address is inside it.
+        if (explicit == null && address.any(Char::isDigit) && Regex("(?i)\\bCABA\\b").containsMatchIn(address)) return null
+        val normalizedAddress = normalize(explicit ?: address)
         return excludedZones.firstOrNull { zone ->
-            val normalizedZone = normalize(zone).substringBefore("(").trim()
+            val normalizedZone = normalize(zone.substringBefore("(")).trim()
             if (normalizedZone.isBlank()) return@firstOrNull false
             normalizedZone.split("/", "-", ",").map { it.trim() }
                 .filter { it.length >= 3 }
@@ -124,12 +158,22 @@ class TripEvaluator(
         return Regex("(?:^|\\s)$escaped(?:$|\\s|,|-)", RegexOption.IGNORE_CASE).containsMatchIn(text)
     }
 
-    private fun scorePriceContext(text: String, start: Int, end: Int): Int {
-        val context = text.substring(maxOf(0, start - 70), minOf(text.length, end + 70))
-        var score = 0
-        if (Regex("total|ganancia|recibir|oferta|tarifa|viaje", RegexOption.IGNORE_CASE).containsMatchIn(context)) score += 5
-        if (Regex("propina|extra|bono|tarifa base", RegexOption.IGNORE_CASE).containsMatchIn(context)) score -= 3
-        return score
+    private fun isPromotionalAmount(text: String, amount: MatchResult, amounts: List<MatchResult>): Boolean {
+        val index = amounts.indexOf(amount)
+        val before = text.substring(if (index > 0) amounts[index - 1].range.last + 1 else 0, amount.range.first)
+        val after = text.substring(amount.range.last + 1, amounts.getOrNull(index + 1)?.range?.first ?: text.length)
+        if (Regex("""(?i)^\s*(?:adicionales?\b|de\s+tarifa\s+base\b)""").containsMatchIn(after)) return true
+        // A display capture can include LoVale's own net estimate; it is never the fare.
+        if (Regex("""(?i)\bneto\s+estimado\s*s?\s*$""").containsMatchIn(before)) return true
+        val label = "(?:boost\\s*\\+?|turbo|promoci[oó]n|promo|bono|bonificaci[oó]n|adicional|extra|propina)"
+        // Etiqueta pegada al importe; no descartar el total solo por tener Turbo en la pantalla.
+        val prefix = Regex("""(?i)\b$label\s*(?:(?:de|por|hasta)\s*)?[:·+\-]?\s*$""")
+        val suffix = Regex("""(?i)^\s*(?:de|en|por)\s+$label\b""")
+        val trailingLabel = index == amounts.lastIndex && Regex("""(?i)^\s*$label\b""").containsMatchIn(after)
+        val previousAmountOwnsLabel = index > 0 &&
+            Regex("""(?i)^\s*(?:de|en|por)\s+$label\s*$""").matches(before)
+        val includedComponent = Regex("""(?i)^\s*incluid[oa]\b""").containsMatchIn(after)
+        return (!previousAmountOwnsLabel && prefix.containsMatchIn(before)) || suffix.containsMatchIn(after) || trailingLabel || includedComponent
     }
 
     private fun parseMoney(value: String): Double {
@@ -149,7 +193,9 @@ class TripEvaluator(
                     v.replace(",", "").toDoubleOrNull() ?: 0.0
                 }
             }
-            else -> v.replace(".", "").toDoubleOrNull() ?: 0.0
+            else -> if (v.contains('.') && v.substringAfterLast('.').length in 1..2) {
+                v.toDoubleOrNull() ?: 0.0
+            } else v.replace(".", "").toDoubleOrNull() ?: 0.0
         }
     }
 

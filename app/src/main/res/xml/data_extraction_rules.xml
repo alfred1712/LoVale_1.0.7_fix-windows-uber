@@ -5,11 +5,19 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="sharedpref" path="monitor_summary.xml" />
+        <exclude domain="sharedpref" path="journey_metrics.xml" />
+        <exclude domain="file" path="datastore/offer_history.preferences_pb" />
         <!-- TODO: Use <include> and <exclude> to control what is backed up.
         <include .../>
         <exclude .../>
         -->
     </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="monitor_summary.xml" />
+        <exclude domain="file" path="datastore/offer_history.preferences_pb" />
+        <exclude domain="sharedpref" path="journey_metrics.xml" />
+    </device-transfer>
     <!--
     <device-transfer>
         <include .../>

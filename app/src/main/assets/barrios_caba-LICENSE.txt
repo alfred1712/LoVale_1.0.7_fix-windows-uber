@@ -1,0 +1,6 @@
+Fuente: Gobierno de la Ciudad Autónoma de Buenos Aires, BA Data — Barrios.
+https://data.buenosaires.gob.ar/dataset/barrios
+https://cdn.buenosaires.gob.ar/datosabiertos/datasets/innovacion-transformacion-digital/barrios/barrios.geojson
+Licencia: CC-BY-2.5-AR. https://creativecommons.org/licenses/by/2.5/ar/
+Dataset actualizado el 29/07/2026 según BA Data. Descargado el 20/09/2026.
+Geometrías originales, sin simplificar. LoVale representa estos polígonos para selección de barrios.
