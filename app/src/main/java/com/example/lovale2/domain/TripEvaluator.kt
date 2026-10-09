@@ -51,11 +51,13 @@ class TripEvaluator(
 
         val priceMatches = Regex("""(?:\$|ARS)\s*([0-9][0-9.,]*)""", RegexOption.IGNORE_CASE)
             .findAll(normalized).toList()
+        // Rates displayed by the platform are derived values, never the fare.
+        val unitRateSuffix = Regex("""^\s*(?:[/⁄∕]|por\s+)\s*(?:km|h|hora|min)\b""", RegexOption.IGNORE_CASE)
+        val unitRates = priceMatches.filter { unitRateSuffix.containsMatchIn(normalized.substring(it.range.last + 1)) }
         val fareCandidates = priceMatches
             // Los adicionales del mapa (+ARS 410) no son el importe de la tarjeta.
             .filterNot { normalized.substring(0, it.range.first).trimEnd().endsWith("+") }
-            .filterNot { Regex("""^\s*/\s*(?:km|h|min)\b""", RegexOption.IGNORE_CASE)
-                .containsMatchIn(normalized.substring(it.range.last + 1)) }
+            .filterNot { it in unitRates }
             .filterNot { isPromotionalAmount(normalized, it, priceMatches) }
         // A card is now ordered top-to-bottom: headline fare precedes bonus components.
         val price = fareCandidates
@@ -95,7 +97,7 @@ class TripEvaluator(
             pickupDurationMin = if (pairs.size >= 2) pickupPair?.first ?: 0.0 else 0.0,
             completeReading = price.isFinite() && price > 0.0 && pairs.size == 2 && !ambiguousUnit &&
                 pairs.all { (minutes, km) -> km / minutes * 60 <= 160 },
-            priceDiagnostics = "amounts=${priceMatches.size} excluded=${priceMatches.size - fareCandidates.size} candidates=${fareCandidates.size} ambiguousUnit=$ambiguousUnit routePairs=${pairs.size} routes=${pairs.joinToString { "${it.first}min/${it.second}km" }}"
+            priceDiagnostics = "amounts=${priceMatches.size} unitRates=${unitRates.size} excluded=${priceMatches.size - fareCandidates.size} candidates=${fareCandidates.size} ambiguousUnit=$ambiguousUnit routePairs=${pairs.size} routes=${pairs.joinToString { "${it.first}min/${it.second}km" }}"
         )
     }
 
@@ -138,7 +140,10 @@ class TripEvaluator(
 
     private fun findExcludedZone(address: String, excludedZones: List<String>): String? {
         if (address.isBlank()) return null
-        val normalizedAddress = normalize(address)
+        val explicit = explicitNeighborhood(address)
+        // A CABA street named after a barrio is not proof that the address is inside it.
+        if (explicit == null && address.any(Char::isDigit) && Regex("(?i)\\bCABA\\b").containsMatchIn(address)) return null
+        val normalizedAddress = normalize(explicit ?: address)
         return excludedZones.firstOrNull { zone ->
             val normalizedZone = normalize(zone.substringBefore("(")).trim()
             if (normalizedZone.isBlank()) return@firstOrNull false

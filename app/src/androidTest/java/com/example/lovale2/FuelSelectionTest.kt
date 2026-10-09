@@ -11,6 +11,13 @@ import org.junit.Test
 
 class FuelSelectionTest {
     @get:Rule val compose = createComposeRule()
+    @Test fun editingManualFuelDoesNotEnableAutomaticUpdates() {
+        var saved: AutoFuelSettings? = null
+        compose.setContent { MaterialTheme { FuelSelectionDialog(AutoFuelSettings(enabled = false), {}, { saved = it }) } }
+        compose.onNode(isToggleable()).assertIsOff()
+        compose.onNodeWithText("Guardar y consultar").performClick()
+        compose.runOnIdle { assertFalse(requireNotNull(saved).enabled) }
+    }
     @Test fun brandChangesProductChoicesAndKeepsValidSelection() {
         var saved: AutoFuelSettings? = null
         compose.setContent { MaterialTheme { FuelSelectionDialog(AutoFuelSettings(), {}, { saved = it }) } }

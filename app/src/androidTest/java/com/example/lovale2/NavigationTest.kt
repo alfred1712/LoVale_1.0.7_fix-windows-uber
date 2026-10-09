@@ -33,7 +33,7 @@ class NavigationTest {
     }
 
     @Test fun diagnosticControlsAreReachableAndVisualRecordingIsOptIn() {
-        compose.onNodeWithContentDescription("Ganancias").performClick()
+        compose.onNodeWithContentDescription("Jornada").performClick()
         compose.onNodeWithText("Preparar registro").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithText("Registrar una prueba").assertIsDisplayed()
         if (Build.VERSION.SDK_INT >= 34) compose.onNode(isToggleable()).assertIsOff()
@@ -44,7 +44,7 @@ class NavigationTest {
     @Test fun tabsSeparateContentAndStayInsideSystemBars() {
         compose.onNodeWithText("Panel de control").assertIsDisplayed()
         compose.onNodeWithText("Mi vehículo").assertDoesNotExist()
-        compose.onNodeWithText("Ganancias de hoy").assertDoesNotExist()
+        compose.onNodeWithText("Tu jornada").assertDoesNotExist()
         // Compare content bounds with the actual device insets, not a fixed screen size.
         val density = compose.activity.resources.displayMetrics.density
         val insets = ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
@@ -56,10 +56,10 @@ class NavigationTest {
         capture("inicio")
         compose.onNodeWithContentDescription("Combustible").performClick()
         compose.onNodeWithText("Mi vehículo").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Ganancias de hoy").assertDoesNotExist()
+        compose.onNodeWithText("Tu jornada").assertDoesNotExist()
         capture("combustible")
-        compose.onNodeWithContentDescription("Ganancias").performClick()
-        compose.onNodeWithText("Ganancias de hoy").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Jornada").performClick()
+        compose.onNodeWithText("Tu jornada").assertIsDisplayed()
         compose.onNodeWithText("Km de jornada · GPS").assertIsDisplayed()
         compose.onNodeWithText("Historial de ofertas").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Mi vehículo").assertDoesNotExist()

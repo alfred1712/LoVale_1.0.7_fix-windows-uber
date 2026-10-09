@@ -8,6 +8,7 @@ data class HealthStatus(val label: String = "Pausado", val warning: Boolean = fa
 
 /** Reports observed faults, never infers missed offers from an idle screen. */
 object MonitoringHealth {
+    val readings = com.example.lovale2.domain.ReadingWatch()
     @Volatile var connected = false
         private set
     @Volatile private var lastEvent = 0L
@@ -23,9 +24,9 @@ object MonitoringHealth {
         ocrSince = 0
         if (success) failures = 0 else { failures++; lastFailure = SystemClock.elapsedRealtime() }
     }
-    fun paused() { failures = 0; ocrSince = 0; lastEvent = 0; mutable.value = HealthStatus() }
+    fun paused() { readings.reset(); failures = 0; ocrSince = 0; lastEvent = 0; mutable.value = HealthStatus() }
     fun update(active: Boolean, permission: Boolean, overlay: Boolean, interactive: Boolean, now: Long = SystemClock.elapsedRealtime()) {
-        mutable.value = assess(active, permission && connected, overlay, interactive,
+        mutable.value = if (active && readings.warning(now)) HealthStatus("Lectura cambió: revisá actualización o reportá el error", true) else assess(active, permission && connected, overlay, interactive,
             lastEvent > 0 && now - lastEvent < 15000,
             (ocrSince > 0 && now - ocrSince > 15000) || (failures >= 3 && now - lastFailure < 30000))
     }

@@ -29,7 +29,7 @@ class CompactNavigationTest(private val width: Int, private val height: Int, pri
             CompositionLocalProvider(LocalDensity provides Density(1f, font)) {
                 LoValeTheme {
                     Box(Modifier.size(width.dp, height.dp)) {
-                        LoValeNavigation(fuel = { Text("Precio visible") }, earnings = { Text("Neto visible") }) {
+                        LoValeNavigation(fuel = { Text("Precio visible") }, earnings = { Text("Neto visible") }, preferences = { Text("Opciones visibles") }) {
                             Column(Modifier.verticalScroll(rememberScrollState())) {
                                 repeat(30) { Text("Filtro $it", Modifier.padding(12.dp)) }
                             }
@@ -41,8 +41,12 @@ class CompactNavigationTest(private val width: Int, private val height: Int, pri
         compose.onNodeWithText("Filtro 29").performScrollTo().assertIsDisplayed()
         compose.onNodeWithContentDescription("Combustible").assertIsDisplayed().performClick()
         compose.onNodeWithText("Precio visible").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Ganancias").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Jornada").assertIsDisplayed().performClick()
         compose.onNodeWithText("Neto visible").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Preferencias").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Opciones visibles").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Movida Ya").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Abrir Movida Ya").performScrollTo().assertIsDisplayed()
         compose.onNodeWithContentDescription("Inicio").performClick()
         compose.onNodeWithText("Filtro 29").assertIsDisplayed()
     }

@@ -78,18 +78,7 @@ class TripAccessibilityService : AccessibilityService() {
     private var ocrInProgress = false
 
     private val handler = Handler(Looper.getMainLooper())
-    private val completion = com.example.lovale2.domain.CompletedTripTracker()
     private val summary by lazy { com.example.lovale2.data.settings.SessionSummaryStore.get(this) }
-    private fun completionDecision(decision: com.example.lovale2.domain.CompletedTripTracker.Decision?) {
-        if (decision == null) return
-        val automatic = decision.completed && settingsCache.autoConfirmTrips
-        DiagnosticRecorder.event("trip_completion", "offerId" to decision.id, "automatic" to automatic, "reason" to decision.reason)
-        serviceScope.launch {
-            try { OfferHistory(this@TripAccessibilityService).applyCompletion(decision.id, automatic, decision.reason != "cancelado", decision.reason.startsWith("aceptado"), decision.finalPrice) }
-            catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) { Log.w(TAG, "HISTORY confirmación falló: ${e.javaClass.simpleName}") }
-        }
-    }
     private val offerDismissal = com.example.lovale2.domain.OfferDismissal()
     private var watchingOverlay = false
     private val checkOverlay = object : Runnable {
@@ -114,7 +103,6 @@ class TripAccessibilityService : AccessibilityService() {
         offerDismissal.reset()
         TripOverlayService.dismissOffer(reason)
     }
-    private var visibleCardActions = emptyList<Pair<Rect, Double>>()
     private var dismissTargets = emptyList<Rect>()
     private var dismissTargetsAt = 0L
     private var suppressUntil = 0L
@@ -164,6 +152,7 @@ class TripAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         MonitoringHealth.connected(true)
         DiagnosticRecorder.initialize(this)
+        DiagnosticRecorder.event("reader_connected")
         serviceScope.launch {
             DiagnosticRecorder.state.collectLatest { diagnostic ->
                 if (diagnostic.active && diagnostic.visual) {
@@ -188,7 +177,8 @@ class TripAccessibilityService : AccessibilityService() {
                 val appCambio = settings.selectedApp != settingsCache.selectedApp
                 if (appCambio || settings.serviceActive != settingsCache.serviceActive) {
                     if (appCambio || !settings.serviceActive) DiagnosticRecorder.stop("pausa o cambio de plataforma")
-                    // Keep accepted-trip evidence while the driver switches platforms. It expires independently.
+                    com.example.lovale2.diagnostics.ReadingHealthLog.platform(settings.selectedApp?.label)
+                    DiagnosticRecorder.event(if (settings.serviceActive) "monitor_active" else "monitor_paused")
                     MonitoringHealth.paused()
                     generation++
                     watchingOverlay = false
@@ -238,26 +228,8 @@ class TripAccessibilityService : AccessibilityService() {
                     node?.getBoundsInScreen(clicked)
                     val visualClose = !clicked.isEmpty && SystemClock.elapsedRealtime() - dismissTargetsAt < 5000 &&
                         dismissTargets.any { it.contains(clicked.centerX(), clicked.centerY()) }
-                    var cardFare: Double? = if (SystemClock.elapsedRealtime() - dismissTargetsAt < 5000)
-                        visibleCardActions.filter { it.first.contains(clicked.centerX(),clicked.centerY()) }.singleOrNull()?.second else null
-                    var parent = node?.parent
-                    repeat(4) {
-                        val current = parent
-                        if (current != null) {
-                            val texts = mutableListOf<String>()
-                            recolectarTextos(current, texts, TreeBudget(SystemClock.elapsedRealtime() + 15, true))
-                            val candidate = TripEvaluator(0.0, 0.0).extraerDatosDeViaje(texts.joinToString(" "))
-                            if (candidate.completeReading && cardFare == null) cardFare = candidate.precio
-                            parent = if (cardFare == null) current.parent else null
-                            @Suppress("DEPRECATION") current.recycle()
-                        }
-                    }
-                    @Suppress("DEPRECATION") parent?.recycle()
                     val labels = try { event.text.map { it.toString() } + listOfNotNull(node?.text?.toString(), node?.contentDescription?.toString(), node?.viewIdResourceName?.substringAfterLast('/')?.takeIf { it.contains("close", true) || it.contains("reject", true) }?.let { "cerrar" }) }
                         finally { @Suppress("DEPRECATION") node?.recycle() }
-                    completion.click(event.packageName.toString(), labels, SystemClock.elapsedRealtime(), cardFare)?.let {
-                        completionDecision(com.example.lovale2.domain.CompletedTripTracker.Decision(it, false, "aceptado; final pendiente"))
-                    }
                     if (TripOverlayService.isOfferVisible() && (visualClose || labels.any { com.example.lovale2.domain.OfferDismissal.isCloseAction(it) || it.trim().lowercase() in setOf("aceptar", "me interesa") })) closeOffer("rechazo/cierre de oferta")
                 } catch (e: Exception) { Log.w(TAG, "A11Y acción no legible: ${e.javaClass.simpleName}") }
             }
@@ -394,10 +366,9 @@ class TripAccessibilityService : AccessibilityService() {
         readId++
         DiagnosticRecorder.event("read", "readId" to readId, "source" to source, "chars" to textoCompleto.length)
         DiagnosticRecorder.text(source, textos.joinToString("\n"))
+        if (com.example.lovale2.domain.ReadingWatch.candidate(textoCompleto)) com.example.lovale2.diagnostics.ReadingReport.observed(source, textos.joinToString("\n"))
+        MonitoringHealth.readings.observe(com.example.lovale2.domain.ReadingWatch.candidate(textoCompleto), false, SystemClock.elapsedRealtime())
 
-        completionDecision(completion.observe(targetPackage, textoCompleto, SystemClock.elapsedRealtime()))
-        // A receipt is not a new offer. Allow the existing bounded OCR retry to corroborate its final amount.
-        if (completion.isFinalScreen(textoCompleto)) return !completion.awaitingFinal
         val candidate = esPantallaDeOfertas(selectedApp, textoCompleto)
         // Uber/DiDi may expose only the waiting screen through A11Y while an offer is drawn.
         if ((source == "OCR" || !usesOcrFallback(selectedApp)) && TripOverlayService.isOfferVisible() &&
@@ -416,7 +387,6 @@ class TripAccessibilityService : AccessibilityService() {
         }
 
         if (source == "A11Y" && selectedApp == RideApp.DIDI && textoCompleto.contains("Centro de viajes", true) && Build.VERSION.SDK_INT >= 30) return false
-        if (centralCards == null) completion.clearVisibleOffers()
         val ofertas = separarOfertas(textoCompleto, selectedApp)
         if (ofertas.isEmpty()) return false
 
@@ -555,6 +525,7 @@ class TripAccessibilityService : AccessibilityService() {
                     val wrapped = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
                     bitmap = try { wrapped?.copy(Bitmap.Config.ARGB_8888, false) } finally { wrapped?.recycle() }
                     val original = bitmap ?: error("Bitmap nulo")
+                    DiagnosticRecorder.event("screenshot_ready")
                     if (!windowCapture) {
                         val bounds = Rect(window.bounds)
                         check(bounds.intersect(0, 0, original.width, original.height)) { "Bounds fuera del display" }
@@ -595,27 +566,21 @@ class TripAccessibilityService : AccessibilityService() {
                 val elapsed = SystemClock.elapsedRealtime() - startedAt
                 DiagnosticRecorder.event("ocr_result", "ms" to elapsed, "cards" to reading.cards.size, "refined" to reading.refined)
                 Log.d(TAG, "OCR focalizado ms=$elapsed cards=${reading.cards.size} refined=${reading.refined}")
-                if (!ocrPlatformActive() || token != generation || currentTargetWindow() != expectedWindow || elapsed > 5000L) return@launch
+                if (!ocrPlatformActive() || token != generation || currentTargetWindow() != expectedWindow || elapsed > 5000L) {
+                    DiagnosticRecorder.event("stale_read")
+                    return@launch
+                }
                 val app = settingsCache.selectedApp ?: return@launch
                 dismissTargetsAt = SystemClock.elapsedRealtime()
                 val margin = (resources.displayMetrics.density * 18).toInt()
                 dismissTargets = reading.dismissTargets.map { line -> Rect(line.left, line.top, line.right, line.bottom).apply {
                     offset(expectedWindow?.bounds?.left ?: 0, expectedWindow?.bounds?.top ?: 0); inset(-margin, -margin)
                 } }
-                visibleCardActions = reading.cards.mapNotNull { card ->
-                    val action = card.action ?: return@mapNotNull null
-                    val data = TripEvaluator(0.0,0.0).extraerDatosDeViaje(card.text)
-                    if (!data.completeReading) return@mapNotNull null
-                    Rect(action.left,action.top,action.right,action.bottom).apply {
-                        offset(expectedWindow?.bounds?.left ?: 0,expectedWindow?.bounds?.top ?: 0); inset(-margin,-margin)
-                    } to data.precio
-                }
                 val parsed = if (reading.cards.isEmpty()) {
                     procesarTextoDePantalla(listOf(reading.text), app, targetPackage, "OCR")
                 } else {
                     var all = true
                     val central = app == RideApp.DIDI && (reading.cards.size > 1 || reading.text.contains("Centro de viajes", true))
-                    completion.clearVisibleOffers()
                     centralCards = if (central) arrayListOf() else null
                     try {
                         for (card in reading.cards) {
@@ -634,6 +599,7 @@ class TripAccessibilityService : AccessibilityService() {
             catch (e: Exception) {
                 MonitoringHealth.ocrFinished(false)
                 Log.e(TAG, "OCR lectura focalizada falló", e)
+                DiagnosticRecorder.event("ocr_error")
                 if (allowRetry) scheduleRetry()
             } finally { bitmap.recycle(); ocrInProgress = false }
         }
@@ -665,7 +631,9 @@ class TripAccessibilityService : AccessibilityService() {
         source: String
     ): Boolean {
         if (SystemClock.elapsedRealtime() < suppressUntil) return false
-        val activeSettings = settingsCache
+        val options = com.example.lovale2.data.settings.DriverOptionsStore.get(this).state.value
+        if (options.quietAt()) return false
+        val activeSettings = options.effective(settingsCache)
         val minKm = activeSettings.minRateByKm.replace(',', '.').toDoubleOrNull() ?: 950.0
         val minHora = activeSettings.minRateByHour.replace(',', '.').toDoubleOrNull() ?: 0.0
         val maxPickup = activeSettings.maxPickupDistance.replace(',', '.').toDoubleOrNull() ?: 0.0
@@ -701,6 +669,7 @@ class TripAccessibilityService : AccessibilityService() {
             return false
         }
 
+        MonitoringHealth.readings.observe(true, true, SystemClock.elapsedRealtime())
         val evaluacion = tripEvaluator.evaluarViaje(datos, activeSettings.excludedZones)
         val nivel = classifyOffer(datos, evaluacion, activeSettings)
         lastCompleteAt = SystemClock.elapsedRealtime()
@@ -727,7 +696,6 @@ class TripAccessibilityService : AccessibilityService() {
         val anterior = ofertasProcesadas[fingerprint]
         if (anterior != null && ahora - anterior < 30000L) {
             ofertasProcesadas[fingerprint] = ahora
-            recordIds[fingerprint]?.let { completion.offered(com.example.lovale2.domain.CompletedTripTracker.Offer(it, packageName, datos.precio, ahora)) }
             if (centralCards != null) mostrarResultado(evaluacion, datos, nivel, maxPickup, fingerprint, activeSettings)
             resolveZones(datos, fingerprint, activeSettings)
             DiagnosticRecorder.event("deduplicated", "offerId" to fingerprint)
@@ -741,22 +709,27 @@ class TripAccessibilityService : AccessibilityService() {
         }
 
         summary.offer()
+        OfferFeedback.play(this, options)
         val recordId = java.util.UUID.randomUUID().toString()
         recordIds[fingerprint] = recordId
         while (recordIds.size > 100) recordIds.remove(recordIds.keys.first())
         DiagnosticRecorder.event("history_offer", "recordId" to recordId, "offerId" to fingerprint)
-        completion.offered(com.example.lovale2.domain.CompletedTripTracker.Offer(recordId, packageName, datos.precio, ahora))
         serviceScope.launch {
             try {
                 OfferHistory(this@TripAccessibilityService).add(OfferRecord(System.currentTimeMillis(), app.label,
                     datos.precio, evaluacion.tarifaPorKm, evaluacion.tarifaPorHora,
                     nivel,
                     if (maxPickup > 0 && datos.pickupDistanceKm > maxPickup) "PICKUP_EXCEDIDO" else evaluacion.motivo.name,
-                    false, id = recordId, totalKm = datos.distanciaKm + datos.pickupDistanceKm,
+                    false, id = recordId, sessionId = summary.state.value.startedAt, targetKm = minKm, targetHour = minHora,
+                    surge = com.example.lovale2.domain.surgeLabel(ofertaTexto), neighborhood = com.example.lovale2.domain.explicitNeighborhood(datos.destino), totalKm = datos.distanciaKm + datos.pickupDistanceKm,
                     totalMinutes = datos.duracionMin + datos.pickupDurationMin,
                     costs = tripEvaluator.estimarCostos(datos, activeSettings.vehicleCosts),
                     vehicleSnapshot = activeSettings.vehicleCosts.takeIf { it.ready }))
-            } catch (e: Exception) { Log.e(TAG, "HISTORY no se pudo guardar oferta", e) }
+                DiagnosticRecorder.event("history_saved")
+            } catch (e: Exception) {
+                DiagnosticRecorder.event("history_error")
+                Log.e(TAG, "HISTORY no se pudo guardar oferta", e)
+            }
         }
         mostrarResultado(evaluacion, datos, nivel, maxPickup, fingerprint, activeSettings)
         resolveZones(datos, fingerprint, activeSettings)
@@ -767,15 +740,16 @@ class TripAccessibilityService : AccessibilityService() {
         if (hasExplicitZone(datos.pickup) && hasExplicitZone(datos.destino)) return
         if (zoneJobs.size >= 8 || !zoneJobs.add(offerId)) return
         val token = generation
+        val originalSettings = settingsCache
         val window = currentTargetWindow()
         serviceScope.launch {
             try {
-                val stillRelevant = { generation == token && settingsCache == settings && settingsCache.serviceActive }
+                val stillRelevant = { generation == token && settingsCache == originalSettings && settingsCache.serviceActive }
                 val pickup = if (hasExplicitZone(datos.pickup)) null else neighborhoods.resolve(datos.pickup, stillRelevant)
                 val destination = if (hasExplicitZone(datos.destino)) null else neighborhoods.resolve(datos.destino, stillRelevant)
                 if (pickup == null && destination == null) return@launch
                 // Never revive a rejected offer, update another platform or attach stale screen results.
-                if (generation != token || settingsCache != settings || !settingsCache.serviceActive || currentTargetWindow() != window) return@launch
+                if (generation != token || settingsCache != originalSettings || !settingsCache.serviceActive || currentTargetWindow() != window) return@launch
                 val enriched = datos.copy(
                     pickup = pickup?.let { "${datos.pickup}, CABA - $it" } ?: datos.pickup,
                     destino = destination?.let { "${datos.destino}, CABA - $it" } ?: datos.destino)
@@ -783,7 +757,7 @@ class TripAccessibilityService : AccessibilityService() {
                 val known = hasExplicitZone(enriched.pickup) && hasExplicitZone(enriched.destino)
                 val level = classifyOffer(enriched, result, settings)
                 TripOverlayService.updateZone(offerId, known, result.zonaDetectada.orEmpty(), level)
-                recordIds[offerId]?.let { OfferHistory(this@TripAccessibilityService).updateEvaluation(it, level, result.motivo.name) }
+                recordIds[offerId]?.let { OfferHistory(this@TripAccessibilityService).updateEvaluation(it, level, result.motivo.name, com.example.lovale2.domain.explicitNeighborhood(enriched.destino)) }
                 Log.d(TAG, "ZONE/USIG resolved pickup=${pickup != null} destination=${destination != null} known=$known")
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) { Log.w(TAG, "ZONE/USIG unavailable: ${e.javaClass.simpleName}") }
@@ -1045,6 +1019,7 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        DiagnosticRecorder.event("reader_disconnected")
         DiagnosticRecorder.stop("servicio interrumpido")
         MonitoringHealth.connected(false)
         destroyed = true

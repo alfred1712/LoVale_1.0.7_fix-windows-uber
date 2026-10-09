@@ -13,14 +13,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.lovale2.domain.VehicleCosts
-import com.example.lovale2.domain.dailySummary
 import kotlinx.coroutines.delay
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private fun money(value: Double) = "$ " + NumberFormat.getNumberInstance(Locale.forLanguageTag("es-AR"))
+internal fun money(value: Double) = "$ " + NumberFormat.getNumberInstance(Locale.forLanguageTag("es-AR"))
     .apply { maximumFractionDigits = 0 }.format(value)
 
 @Composable
@@ -41,6 +40,7 @@ fun FuelScreen(model: MainViewModel) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(config.vehicle.ifBlank { "Configurá tu vehículo" }, style = MaterialTheme.typography.titleMedium)
+                VehicleThumbnail(config.vehicle)
                 Text(if (config.ready) "${config.consumptionPer100Km} ${if (config.fuel == "GNC") "m³" else "L"}/100 km · ${config.fuel}" else "Faltan datos del vehículo")
                 OutlinedButton(onClick = { showSetup = true }, modifier = Modifier.fillMaxWidth()) { IconLabel(Icons.Default.DirectionsCar, "Mi vehículo") }
             }
@@ -62,66 +62,36 @@ fun FuelScreen(model: MainViewModel) {
 }
 
 @Composable
-fun EarningsScreen(model: MainViewModel) {
-    val records by model.offers.collectAsState()
+fun JourneyScreen(model: MainViewModel) {
     val session by model.sessionSummary.collectAsState()
-    val settings by model.settings.collectAsState()
     val now by produceState(System.currentTimeMillis()) {
         while (true) { value = System.currentTimeMillis(); delay(60000) }
     }
-    val summary = remember(records, now) { dailySummary(records, now) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Ganancias de hoy", style = MaterialTheme.typography.headlineSmall)
+        Text("Tu jornada", style = MaterialTheme.typography.headlineSmall)
         JourneyPanel(model)
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Neto estimado${if (summary.missingCosts > 0) " · parcial" else ""}")
-                Text(money(summary.net), style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary)
-                IconLabel(Icons.Default.CheckCircle, "${summary.trips} confirmados")
-            }
-        }
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                IconLabel(Icons.Default.AccountBalanceWallet, "Bruto  ${money(summary.gross)}")
-                IconLabel(Icons.Default.LocalGasStation, "Gastos est.  ${money(summary.expenses)}")
-            }
-        }
-        if (summary.missingCosts > 0) Text("${summary.missingCosts} viajes sin costos calculados.")
-
         if (session.startedAt > 0) {
-            val end = session.endedAt.takeIf { it > 0 } ?: now
-            val trips = records.filter { it.completedAt in session.startedAt..end }
-            val review = records.count { it.timestamp in session.startedAt..end && it.reviewRequired && it.completedAt == 0L }
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     IconLabel(Icons.Default.Assessment, if (session.endedAt > 0) "Última jornada" else "Jornada en curso")
-                    Text("${records.count { it.acceptedAt in session.startedAt..end }} aceptados · ${trips.size} finalizados")
                     Text("${session.offers} ofertas leídas")
-                    Text("Neto est. ${money(trips.sumOf { it.costs?.net ?: 0.0 })}${if (trips.any { it.costs == null }) " · parcial" else ""}")
-                    if (review > 0) Text("$review viajes para revisar", color = MaterialTheme.colorScheme.error)
                     if (session.interrupted) Text("Sesión interrumpida", color = MaterialTheme.colorScheme.error)
                     MoreInformation {
                         Text("${session.incompleteReads} lecturas incompletas. Una oferta puede tener varias lecturas; este número no cuenta ofertas perdidas.")
-                        Text("Resumen desde que activaste LoVale. El neto incluye solamente los viajes confirmados y conserva los costos estimados de cada oferta.")
+                        Text("Ofertas analizadas desde que activaste LoVale. No representa viajes realizados ni ganancias cobradas.")
                     }
                 }
             }
         }
+        StatisticsPanel(model, now)
         DriverTools(model, showTest = false)
         DiagnosticPanel(model)
         MoreInformation {
-            Row {
-                Switch(settings.autoConfirmTrips, model::setAutoConfirm)
-                Text("Confirmación automática · en prueba")
-            }
-            Text("Registra la aceptación por botón o pantalla de recogida. Suma al detectar el viaje en curso y dos lecturas del comprobante final; un importe distinto requiere también la acción Finalizar. Si falta evidencia, revisalo en el historial. Esta detección necesita validación con finales reales de cada app.")
-            Text("El importe y los costos siguen siendo estimados; podés deshacer una confirmación automática en el historial.")
             Text("Cómo se estima el desgaste", style = MaterialTheme.typography.titleMedium)
             Text("Combustible = km de recogida + viaje, multiplicados por el consumo del vehículo / 100 y el precio del litro o m³.")
             Text("Desgaste = costo de combustible × porcentaje configurado en Mi vehículo. El valor inicial es 20%: por $1.000 de combustible, se reservan $200 para desgaste.")
             Text("Es una reserva orientativa. LoVale no mide neumáticos, frenos, aceite, reparaciones, antigüedad ni depreciación del auto. No usa el GPS de jornada para este cálculo.")
             Text("Neto estimado = tarifa de la oferta − combustible − reserva de desgaste. Cada viaje conserva los valores usados al detectarlo.")
-            Text("Se agrupa por día de confirmación. Los importes y km son los de la oferta. El neto descuenta combustible y desgaste estimados; no incluye desvíos, espera, otros km sin pasajero, peajes ni impuestos. Los viajes sin costos quedan fuera del neto.")
         }
     }
 }
@@ -147,6 +117,7 @@ internal fun VehicleSetup(original: VehicleCosts, dismiss: () -> Unit, save: (Ve
         if (fuel != original.fuel || price.replace(',', '.').toDoubleOrNull() != original.fuelPrice || original.priceUpdatedAt == 0L) System.currentTimeMillis() else original.priceUpdatedAt)
     AlertDialog(onDismissRequest = dismiss, title = { IconLabel(Icons.Default.DirectionsCar, "Mi vehículo") }, text = {
         Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState())) {
+            VehicleThumbnail(vehicle)
             TextButton(onClick = { vehicle = "Fiat Cronos 1.3 MT (MY26)"; fuel = "Nafta"; consumption = "8.0"; if (original.fuel != "Nafta") price = "" }) {
                 Text("Usar referencia Fiat Cronos 1.3 manual")
             }

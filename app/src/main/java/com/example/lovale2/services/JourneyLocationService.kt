@@ -160,14 +160,14 @@ class JourneyLocationService : Service(), LocationListener {
             if (instance != null) return
             val store = JourneyStore.get(context)
             if (store.state.value.homeLatitude == null || store.state.value.homeLongitude == null) {
-                store.update { it.copy(message = "Guardá tu casa en Ganancias") }; return
+                store.update { it.copy(message = "Guardá tu casa en Jornada") }; return
             }
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                store.update { it.copy(message = "Habilitá ubicación precisa en Ganancias") }; return
+                store.update { it.copy(message = "Habilitá ubicación precisa en Jornada") }; return
             }
             try { ContextCompat.startForegroundService(context, Intent(context, JourneyLocationService::class.java)) }
             catch (e: Exception) {
-                store.update { it.copy(message = "Abrí Ganancias para preparar el contador") }
+                store.update { it.copy(message = "Abrí Jornada para preparar el contador") }
                 Log.w("LoVale", "JOURNEY inicio rechazado: ${e.javaClass.simpleName}")
             }
         }

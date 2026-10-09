@@ -88,6 +88,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setServiceActive(active: Boolean) {
         if (!active && activeInProcess.value) com.example.lovale2.diagnostics.DiagnosticRecorder.stop("monitoreo pausado")
         activeInProcess.value = active
+        com.example.lovale2.services.LoValeWidget.refresh(context)
         context.dataStore.edit { it.remove(Keys.SERVICE_ACTIVE) }
     }
     suspend fun setAutoConfirmTrips(enabled: Boolean) = context.dataStore.edit { it[Keys.AUTO_CONFIRM] = enabled }
@@ -146,8 +147,20 @@ class SettingsRepository(private val context: Context) {
         prefs.remove(Keys.SERVICE_ACTIVE)
         if (app == null) prefs.remove(Keys.SELECTED_APP) else prefs[Keys.SELECTED_APP] = app.name
         }
+        com.example.lovale2.services.LoValeWidget.refresh(context)
     }
 
+    suspend fun restoreFilters(value: com.example.lovale2.domain.ConfigurationBackup) {
+        activeInProcess.value = false
+        context.dataStore.edit { prefs ->
+            prefs[Keys.MIN_RATE_KM] = value.minKm
+            prefs[Keys.MIN_RATE_HOUR] = value.minHour
+            prefs[Keys.MAX_PICKUP] = value.pickup
+            prefs[Keys.EXCLUDED_ZONES] = value.zones.toSet()
+            if (value.platform == null) prefs.remove(Keys.SELECTED_APP) else prefs[Keys.SELECTED_APP] = value.platform
+        }
+        com.example.lovale2.services.LoValeWidget.refresh(context)
+    }
     suspend fun setMinRateByHour(value: String) = context.dataStore.edit { it[Keys.MIN_RATE_HOUR] = value }
     suspend fun setMinRateByKm(value: String) = context.dataStore.edit { it[Keys.MIN_RATE_KM] = value }
     suspend fun setMaxPickupDistance(value: String) = context.dataStore.edit { it[Keys.MAX_PICKUP] = value }

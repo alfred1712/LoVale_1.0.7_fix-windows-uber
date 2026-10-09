@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="12dp" android:background="#0B1623">
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="LoVale" android:textColor="#00D7E8" android:textStyle="bold" android:textSize="18sp" />
+    <TextView android:id="@+id/widget_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Pausado" android:textColor="#FFFFFF" android:textSize="16sp" />
+    <TextView android:id="@+id/widget_summary" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:textColor="#FFFFFF" android:textSize="14sp" android:maxLines="4" />
+    <TextView android:id="@+id/widget_updated" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Abrir LoVale" android:textColor="#B4C7CF" android:textSize="12sp" />
+</LinearLayout>

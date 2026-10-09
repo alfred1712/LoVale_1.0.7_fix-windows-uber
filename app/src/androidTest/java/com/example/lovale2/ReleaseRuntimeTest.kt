@@ -16,9 +16,9 @@ class ReleaseRuntimeTest {
         compose.onNodeWithText("Cerrar").performClick()
         compose.onNodeWithContentDescription("Combustible").performClick()
         compose.onNodeWithText("Mi vehículo").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithContentDescription("Ganancias").performClick()
+        compose.onNodeWithContentDescription("Jornada").performClick()
         compose.onNodeWithText("Historial de ofertas").performScrollTo().performClick()
-        compose.onNodeWithText("Revisá los viajes pendientes al terminar la jornada.").assertIsDisplayed()
+        compose.onNodeWithText("Ofertas analizadas; no son viajes realizados.").assertIsDisplayed()
         compose.onNodeWithText("Cerrar").performClick()
     }
 }

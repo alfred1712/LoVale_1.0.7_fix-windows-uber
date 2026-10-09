@@ -53,8 +53,8 @@ class VehicleCostsTest {
     }
     @Test fun confirmedRecordsSurviveMoreThan200Offers() {
         val pending = (1..250).map { record("p$it", 0) }
-        val kept = retainOffers(pending + record("done") + record("expired", now - 32L * 86400000), now)
-        assertEquals(201, kept.size)
+        val kept = retainOffers(pending + record("done") + record("expired", now - 91L * 86400000).copy(timestamp = now - 91L * 86400000), now)
+        assertEquals(251, kept.size)
         assertTrue(kept.any { it.key == "done" })
         assertFalse(kept.any { it.key == "expired" })
     }

@@ -4,6 +4,7 @@
     <!-- Permiso requerido para mostrar la ventana flotante sobre otras aplicaciones -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -32,6 +33,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.LoVale">
 
+        <receiver android:name=".services.LoValeWidget" android:exported="false" android:label="LoVale · Jornada">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_lovale_info" />
+        </receiver>
         <!-- Actividad Principal -->
         <activity
             android:name=".MainActivity"

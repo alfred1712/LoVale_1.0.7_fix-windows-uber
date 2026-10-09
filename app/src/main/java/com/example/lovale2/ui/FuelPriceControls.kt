@@ -90,7 +90,7 @@ fun FuelPriceControls(model: MainViewModel) {
 internal fun FuelSelectionDialog(original: AutoFuelSettings, dismiss: () -> Unit, save: (AutoFuelSettings) -> Unit) {
     var brand by remember { mutableStateOf(original.brand) }
     var product by remember { mutableStateOf(original.product) }
-    var automatic by remember { mutableStateOf(true) }
+    var automatic by remember { mutableStateOf(original.enabled) }
     val products = FuelCatalog.products(brand)
     val draft = original.copy(enabled = automatic, brand = brand, product = product)
     AlertDialog(onDismissRequest = dismiss, title = { Text("Precio de combustible") }, text = {
@@ -108,7 +108,7 @@ internal fun FuelSelectionDialog(original: AutoFuelSettings, dismiss: () -> Unit
 }
 
 @Composable
-private fun ChoiceDropdown(label: String, selected: String, choices: List<String>, change: (String) -> Unit) {
+internal fun ChoiceDropdown(label: String, selected: String, choices: List<String>, change: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text("$label: $selected ▾") }

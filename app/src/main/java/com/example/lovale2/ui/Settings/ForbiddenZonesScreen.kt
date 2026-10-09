@@ -64,6 +64,7 @@ fun ForbiddenZonesScreen(
             )
             Spacer(modifier = Modifier.height(12.dp))
 
+            NeighborhoodMapPanel(forbiddenZones, onAddZone, onRemoveZone)
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },

@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.ui.Modifier
 import com.example.lovale2.ui.LoValeNavigation
 import com.example.lovale2.ui.FuelScreen
-import com.example.lovale2.ui.EarningsScreen
+import com.example.lovale2.ui.JourneyScreen
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -81,7 +81,8 @@ class MainActivity : ComponentActivity() {
                                 onBack = { showZonesScreen = false }
                             )
                         } else {
-                            LoValeNavigation(fuel = { FuelScreen(model) }, earnings = { EarningsScreen(model) }) {
+                            LoValeNavigation(fuel = { FuelScreen(model) }, earnings = { JourneyScreen(model) },
+                                preferences = { com.example.lovale2.ui.DriverPreferencesPanel(model) }) {
                                 MainScreen(
                                     onManageZones = { showZonesScreen = true },
                                     isAccessibilityServiceEnabled = accessibilityEnabled,

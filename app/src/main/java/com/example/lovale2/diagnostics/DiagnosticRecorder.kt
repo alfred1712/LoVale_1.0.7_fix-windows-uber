@@ -47,6 +47,7 @@ object DiagnosticRecorder {
         var bytes: Long = 0, var count: Long = 0, val id: String = java.util.UUID.randomUUID().toString())
 
     @Synchronized fun initialize(context: Context) {
+        ReadingHealthLog.initialize(context)
         if (folder != null) return
         val dir = File(context.applicationContext.noBackupFilesDir, "diagnostic-session")
         folder = dir
@@ -94,6 +95,7 @@ object DiagnosticRecorder {
     fun sessionId(): String? = session?.id
 
     @Synchronized fun event(stage: String, vararg fields: Pair<String, Any?>) {
+        ReadingHealthLog.event(stage, fields.toMap())
         if (!active()) return
         val current = session ?: return
         val at = SystemClock.elapsedRealtime()

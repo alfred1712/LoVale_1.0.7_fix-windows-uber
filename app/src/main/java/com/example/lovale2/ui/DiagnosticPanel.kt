@@ -27,6 +27,14 @@ fun DiagnosticPanel(model: MainViewModel) {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { DiagnosticRecorder.initialize(context) }
+    val exportHealth = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) scope.launch {
+            busy = true
+            try { com.example.lovale2.diagnostics.ReadingHealthLog.export(context, uri); result = "Métricas exportadas" }
+            catch (_: Exception) { result = "No hay métricas disponibles o no se pudo exportar" }
+            finally { busy = false }
+        }
+    }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) scope.launch {
             busy = true
@@ -38,6 +46,8 @@ fun DiagnosticPanel(model: MainViewModel) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             IconLabel(Icons.Default.BugReport, "Diagnóstico de prueba")
+            Text("Lectura: métricas automáticas de 7 días. Sin imágenes ni direcciones.", style = MaterialTheme.typography.bodySmall)
+            TextButton(enabled = !busy, onClick = { exportHealth.launch("LoVale-lectura-7dias.zip") }) { Text("Exportar métricas de lectura") }
             Text(state.message, style = MaterialTheme.typography.bodyMedium)
             if (state.active) {
                 Button(onClick = { DiagnosticRecorder.stop() }, modifier = Modifier.fillMaxWidth()) { Text("Finalizar registro") }

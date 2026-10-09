@@ -68,6 +68,7 @@ class TripOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
+    private var windowAdded = false
     private val cardViews = mutableListOf<View>()
     private var cardsKey = ""
     private var closing = false
@@ -160,6 +161,7 @@ class TripOverlayService : Service() {
 
         try {
             windowManager?.addView(floatingView, params)
+            windowAdded = true
         } catch (e: Exception) {
             DiagnosticRecorder.event("overlay_error", "type" to e.javaClass.simpleName)
             Log.e(TAG, "No se pudo agregar la ventana flotante", e)
@@ -168,7 +170,7 @@ class TripOverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null || !::tvStatus.isInitialized) return START_NOT_STICKY
+        if (intent == null || !::tvStatus.isInitialized || !windowAdded) return START_NOT_STICKY
 
         @Suppress("DEPRECATION")
         val cards = intent.getParcelableArrayListExtra<Intent>("EXTRA_CARDS")
@@ -288,12 +290,19 @@ class TripOverlayService : Service() {
                 background = GradientDrawable().apply { setColor(getColor(R.color.lovale_ink)); cornerRadius = dp(8).toFloat() }
             }
             val lp = WindowManager.LayoutParams(dp(155), WindowManager.LayoutParams.WRAP_CONTENT,
-                (params?.type ?: WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, PixelFormat.TRANSLUCENT).apply {
+                requireNotNull(params).type, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, PixelFormat.TRANSLUCENT).apply {
                 gravity = Gravity.TOP or Gravity.LEFT
                 x = card.getIntExtra("EXTRA_CARD_RIGHT", resources.displayMetrics.widthPixels) - dp(160)
                 y = card.getIntExtra("EXTRA_CARD_TOP", 0)
             }
-            try { windowManager?.addView(label, lp); cardViews += label } catch (e: Exception) { Log.w(TAG, "OVERLAY central: ${e.javaClass.simpleName}") }
+            try {
+                windowManager?.addView(label, lp)
+                cardViews += label
+                DiagnosticRecorder.event("overlay_visible", "test" to card.getBooleanExtra("EXTRA_TEST", false))
+            } catch (e: Exception) {
+                DiagnosticRecorder.event("overlay_error")
+                Log.w(TAG, "OVERLAY central: ${e.javaClass.simpleName}")
+            }
         }
     }
 
@@ -346,6 +355,7 @@ class TripOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        windowAdded = false
         if (instance === this) instance = null
         handler.removeCallbacksAndMessages(null)
         clearCards()

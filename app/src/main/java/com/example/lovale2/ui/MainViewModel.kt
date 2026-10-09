@@ -27,7 +27,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val journey = journeyStore.state
     private val sessionStore = com.example.lovale2.data.settings.SessionSummaryStore.get(application)
     val sessionSummary = sessionStore.state
-    fun setAutoConfirm(enabled: Boolean) = viewModelScope.launch { repository.setAutoConfirmTrips(enabled) }
     fun saveHome(latitude: Double, longitude: Double, address: String = journey.value.homeAddress) {
         require(latitude.isFinite() && longitude.isFinite() && latitude in -90.0..90.0 && longitude in -180.0..180.0)
         journeyStore.update { it.copy(homeAddress = com.example.lovale2.domain.cleanHomeAddress(address), homeLatitude = latitude, homeLongitude = longitude, enabled = true, message = "Casa guardada") }
@@ -46,11 +45,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         journeyStore.update { it.copy(enabled = false) }
     }
 
+    val optionsStore = com.example.lovale2.data.settings.DriverOptionsStore.get(application)
+    val options = optionsStore.state
+    suspend fun restoreConfiguration(value: com.example.lovale2.domain.ConfigurationBackup) {
+        value.options.validate()
+        toggleService(false)
+        repository.restoreFilters(value)
+        optionsStore.save(value.options)
+    }
+    fun saveOptions(value: com.example.lovale2.domain.DriverOptions) = optionsStore.save(value)
+
     private val repository = SettingsRepository(application)
     private val history = OfferHistory(application)
     val offers = history.records.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     fun clearHistory() = viewModelScope.launch { history.clear() }
-    fun setCompleted(key: String, value: Boolean) = viewModelScope.launch { history.setCompleted(key, value) }
     fun saveVehicle(value: VehicleCosts) = viewModelScope.launch {
         repository.saveVehicleCosts(value)
         FuelPriceWorker.schedule(getApplication(), repository.settingsFlow.first().autoFuel.enabled)
@@ -63,7 +71,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun testOffer(text: String, destination: String = ""): String {
         val context = getApplication<Application>()
         if (!android.provider.Settings.canDrawOverlays(context)) return "Habilitá el permiso de ventana flotante."
-        val active = settings.value
+        val active = options.value.effective(settings.value)
         val evaluator = active.evaluator()
         val data = evaluator.extraerDatosDeViaje(text, destination)
         val result = evaluator.evaluarViaje(data, active.excludedZones)
@@ -93,6 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // El estado Activo es de sesión, no debe sobrevivir al cierre/reinicio de LoVale.
         // Al abrir la app siempre empieza pausada y el usuario decide cuándo monitorear.
         viewModelScope.launch {
+            com.example.lovale2.diagnostics.ReadingReport.read(getApplication())
             repository.setServiceActive(false)
             if (!journey.value.running) sessionStore.stop()
             FuelPriceWorker.schedule(getApplication(), repository.settingsFlow.first().autoFuel.enabled)
@@ -103,6 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleService(active: Boolean) {
+        if (active && options.value.quietAt()) return
         viewModelScope.launch { repository.setServiceActive(active) }
 
         val context = getApplication<Application>()

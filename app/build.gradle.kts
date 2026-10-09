@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.lovale2"
         minSdk = 24
         targetSdk = 37
-        versionCode = 40
-        versionName = "1.0.8-beta35"
+        versionCode = 55
+        versionName = "1.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -41,6 +41,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("org.jsoup:jsoup:1.18.3")
     implementation(platform(libs.androidx.compose.bom))

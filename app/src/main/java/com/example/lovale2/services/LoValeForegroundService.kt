@@ -42,6 +42,14 @@ class LoValeForegroundService : Service() {
             SettingsRepository(applicationContext).settingsFlow.collectLatest { settings ->
                 if (!settings.serviceActive) { stopSelf(); return@collectLatest }
                 while (isActive) {
+                    if (com.example.lovale2.data.settings.DriverOptionsStore.get(this@LoValeForegroundService).state.value.quietAt()) {
+                        SettingsRepository(applicationContext).setServiceActive(false)
+                        TripOverlayService.dismissOffer("horario no molestar")
+                        JourneyLocationService.pause(this@LoValeForegroundService)
+                        com.example.lovale2.data.settings.SessionSummaryStore.get(this@LoValeForegroundService).stop()
+                        stopSelf()
+                        return@collectLatest
+                    }
                     val expected = ComponentName(this@LoValeForegroundService, TripAccessibilityService::class.java)
                     val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
                         .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == expected }

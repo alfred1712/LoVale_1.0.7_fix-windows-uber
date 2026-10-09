@@ -1,0 +1,8 @@
+[
+  {"app":"Uber", "fare":6388, "km":6.0, "minutes":31, "text":"Uber Priority\nARS6,388\nARS1,065/km (estimado)\nIdentidad digital verificada\n+ARS766.00 por inicio de viaje prioritario\nA 4 min (0.7 km)\nCalle A, CABA - Almagro\nViaje: 27 min (5.3 km)\nCalle B 123, CABA - Palermo\nMe interesa"},
+  {"app":"Uber", "fare":8511, "km":18.1, "minutes":34, "text":"UberX\nARS8,5ll\nIdentidad digital verificada\nA 8 min (2.5 km)\nCalle A 123, CABA - Caballito\nViaje: 26 min (15.6 km)\nCalle B 456, Olivos\nMe interesa"},
+  {"app":"Uber", "fare":4916, "km":6.6, "minutes":17, "text":"UberX Exclusivo\nARS4,916\nBoost+ de ARS1,326.00 incluido\nAl min (0.2 km)\nCalle A, CABA - Caballito\nViaje: 16 min (6.4 km)\nCalle B 123, CABA - Villa Lugano\nAceptar"},
+  {"app":"DiDi", "fare":4400, "km":4.825, "minutes":17, "text":"Pago con tarjeta\n$4.400\n$2.000 de tarifa base dinámica\n2 min (125 m)\nCalle A 123, CABA\n15 min (4,7 km)\nCalle B 456, CABA\nAceptar"},
+  {"app":"DiDi", "fare":4000, "km":7.5, "minutes":22, "text":"Pago en efectivo\n$4.000\n$500 adicionales\n$1.600 de tarifa base dinámica\n7 min (2,2 km)\nCalle A 123, CABA - Balvanera\n15 min (5,3 km)\nTerminal, CABA - Retiro\nAceptar"},
+  {"app":"Cabify", "fare":3686, "km":4.9, "minutes":21, "text":"$3.686 en app\n$1.215/km\n8 min · 1.9 km\nCalle A, 123\n13 min · 3 km\nCalle B, 456"}
+]

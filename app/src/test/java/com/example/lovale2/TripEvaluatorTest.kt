@@ -8,6 +8,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TripEvaluatorTest {
+    @Test fun uberDisplayedRatesNeverReplaceFare() {
+        val route = "A 6 min (1.6 km) Viaje: 30 min (8.4 km) Aceptar"
+        for (rate in listOf("ARS812/km", "ARS812 / k m", "ARS812\n/\nkm", "ARS812 por km", "ARS812∕km", "ARS812⁄km", "ARS99999/h")) {
+            for (amounts in listOf("ARS8,123 $rate", "$rate ARS8,123")) {
+                val data = evaluator.extraerDatosDeViaje("UberX Exclusivo $amounts $route")
+                assertTrue(amounts, data.completeReading)
+                assertEquals(8123.0, data.precio, .001)
+                val result = evaluator.evaluarViaje(data, emptyList())
+                assertEquals(812.3, result.tarifaPorKm, .001)
+                assertEquals(13538.333333, result.tarifaPorHora, .001)
+                assertTrue(data.priceDiagnostics.contains("unitRates=1"))
+            }
+            val missing = evaluator.extraerDatosDeViaje("$rate $route")
+            assertEquals(0.0, missing.precio, .001)
+            assertTrue(!missing.completeReading)
+        }
+    }
+
 
     @Test
     fun tarifasIncluyenPickupEnLasTresPlataformas() {

@@ -207,6 +207,7 @@ fun MainScreen(
         }
         if (diagnostic.active) Text("Diagnóstico ${if (diagnostic.visual) "con imágenes" else "técnico"} activo",
             color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+        ReadingReportPanel()
         DriverTools(viewModel, showHistory = false)
     }
 
